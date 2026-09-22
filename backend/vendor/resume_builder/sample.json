@@ -1,0 +1,61 @@
+{
+  "name": "Luis Angel Salazar",
+  "title": "Senior Full Stack Developer",
+  "subtitle": "Senior Full Stack Developer · Remote",
+  "email": "luis.salazar@example.com",
+  "phone": "+1 555 0142",
+  "location": "Austin, TX",
+  "citizenship": "US Citizen",
+  "work_authorization": "Authorized to work in the US",
+  "linkedin": "linkedin.com/in/luisangelsalazar",
+  "summary": "Senior full stack developer with 9 years building [highlight]Node.js[/highlight] and [highlight]React[/highlight] platforms at scale. Comfortable owning a product end to end, from Postgres schema design through CI/CD for remote-first teams.",
+  "technicalskills": {
+    "Languages": "TypeScript, Python, Go, SQL",
+    "Frontend": "[highlight]React[/highlight], Next.js, Redux Toolkit, Tailwind CSS",
+    "Backend": "[highlight]Node.js[/highlight], FastAPI, Celery, PostgreSQL, Redis",
+    "Infrastructure": "Docker, Kubernetes, Terraform, AWS, GitHub Actions"
+  },
+  "additional_information": {
+    "Languages": "English (native), Spanish (native)",
+    "Interests": "Distributed systems, developer tooling, trail running"
+  },
+  "experience": [
+    {
+      "title": "Senior Full Stack Developer",
+      "company": "Nimbus Logistics",
+      "location": "Remote",
+      "dates": "2021 – Present",
+      "bullets": [
+        "Led the migration of a 400k-line monolith to [highlight]Node.js[/highlight] services, cutting p95 API latency by 42%.",
+        "Designed the Postgres schema and outbox pipeline behind 12M daily shipment events.",
+        "Mentored four engineers and introduced trunk-based development with GitHub Actions."
+      ]
+    },
+    {
+      "title": "Full Stack Developer",
+      "company": "Google",
+      "location": "Mountain View, CA",
+      "dates": "2017 – 2021",
+      "bullets": [
+        "Shipped internal [highlight]React[/highlight] tooling used by 8,000 engineers.",
+        "Reduced Cloud Spanner query cost by 30% through schema and index redesign."
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "BSc Computer Science",
+      "school": "University of Texas at Austin",
+      "location": "Austin, TX",
+      "dates": "2013 – 2017",
+      "gpa": "3.8"
+    }
+  ],
+  "target_company": "Acme Remote",
+  "job_link": "https://acme.example.com/jobs/senior-full-stack",
+  "company_information": {
+    "public_facts": "Acme Remote builds distributed workforce tooling.",
+    "safe_inferences": "Likely values async-first written communication.",
+    "research_limitations": "No live web access; details are from the model's prior knowledge."
+  }
+}

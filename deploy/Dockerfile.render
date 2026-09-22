@@ -1,0 +1,48 @@
+# worker-render: Python + LibreOffice + metric-compatible fonts + unoserver (Appendix A.4).
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    RB_PDF_BACKEND=unoserver \
+    RENDER_CONCURRENCY=1 \
+    UNOSERVER_MAX_CONVERSIONS=200 \
+    UNOSERVER_MAX_RSS_MB=700 \
+    HOME=/home/app
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libreoffice-writer \
+        libreoffice-core-nogui \
+        fontconfig \
+        fonts-crosextra-carlito \
+        fonts-crosextra-caladea \
+        fonts-liberation \
+        fonts-liberation2 \
+        fonts-dejavu \
+        fonts-noto-core \
+        fonts-gelasio \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# GEN-4: the DOCX keeps the Windows font names; fontconfig substitutes the
+# metric-compatible family LibreOffice has installed.
+COPY deploy/fonts/local.conf /etc/fonts/local.conf
+RUN fc-cache -f
+
+COPY backend/requirements.txt ./
+RUN pip install -r requirements.txt
+
+COPY backend/ ./backend/
+COPY deploy/unoserver-entrypoint.sh /usr/local/bin/unoserver-entrypoint
+RUN chmod +x /usr/local/bin/unoserver-entrypoint \
+    && useradd --uid 10002 --create-home --shell /usr/sbin/nologin app \
+    && mkdir -p /storage /tmp/unoserver && chown -R app:app /storage /app /tmp/unoserver
+WORKDIR /app/backend
+USER app
+
+# HW-1: the render worker runs at a lower CPU priority than the interactive paths.
+ENTRYPOINT ["nice", "-n", "10", "/usr/local/bin/unoserver-entrypoint"]

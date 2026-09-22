@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# Local databases and scratch files
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+backend/_chaos*
+backend/_migration_scratch*.db
+backend/remote_flow.db
+
+# Storage / backups / renders
+backend/storage/
+storage/
+backups/
+*.docx
+*.pdf
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# Secrets and environment
+.env
+deploy/.env
+!deploy/.env.example
+*.pem
+*.key
+
+# Editors / OS
+.DS_Store
+.idea/

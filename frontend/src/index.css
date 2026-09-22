@@ -1,0 +1,113 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 215 20% 65%;
+    --primary: 210 100% 26%;
+    --primary-foreground: 0 0% 100%;
+    --accent: 210 40% 94%;
+    --accent-foreground: 222 47% 11%;
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 0 0% 100%;
+  }
+
+  .dark {
+    --background: 222 47% 8%;
+    --foreground: 210 40% 96%;
+    --card: 222 42% 11%;
+    --card-foreground: 210 40% 96%;
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%;
+    --border: 217 33% 20%;
+    --input: 217 33% 22%;
+    --ring: 215 20% 45%;
+    --primary: 205 90% 60%;
+    --primary-foreground: 222 47% 8%;
+    --accent: 217 33% 20%;
+    --accent-foreground: 210 40% 96%;
+    --destructive: 0 62% 50%;
+    --destructive-foreground: 0 0% 100%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "tnum" 0;
+  }
+}
+
+@layer components {
+  .rf-input {
+    @apply w-full rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm outline-none transition
+      placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .rf-label {
+    @apply mb-1 block text-xs font-medium uppercase tracking-wide text-muted-foreground;
+  }
+
+  .rf-table {
+    @apply w-full border-collapse text-sm;
+  }
+
+  .rf-table th {
+    @apply whitespace-nowrap border-b border-border px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground;
+  }
+
+  .rf-table td {
+    @apply border-b border-border/70 px-3 py-2 align-middle;
+  }
+
+  .rf-scroll {
+    @apply overflow-x-auto;
+  }
+
+  /* UI-3: below tablet width every table row becomes a labelled card. */
+  @media (max-width: 767px) {
+    .rf-table thead {
+      display: none;
+    }
+
+    .rf-table,
+    .rf-table tbody,
+    .rf-table tr,
+    .rf-table td {
+      display: block;
+      width: 100%;
+    }
+
+    .rf-table tr {
+      @apply mb-2 rounded-lg border border-border bg-card p-1;
+    }
+
+    .rf-table td {
+      @apply flex items-start justify-between gap-4 whitespace-normal border-0 px-2 py-1.5;
+      max-width: none;
+      overflow: visible;
+      text-align: right;
+    }
+
+    .rf-table td[data-label]:not([data-label=""])::before {
+      content: attr(data-label);
+      @apply mr-2 flex-none text-left text-[0.7rem] font-medium uppercase tracking-wide text-muted-foreground;
+    }
+
+    .rf-table td[colspan] {
+      justify-content: center;
+      text-align: center;
+    }
+  }
+}

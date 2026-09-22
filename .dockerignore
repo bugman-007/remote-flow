@@ -1,0 +1,14 @@
+**/__pycache__
+**/*.pyc
+**/.venv
+**/.pytest_cache
+**/node_modules
+frontend/dist
+.git
+.gitignore
+docs/benchmarks.md
+*.db
+*.sqlite
+**/storage
+backups
+deploy/.env

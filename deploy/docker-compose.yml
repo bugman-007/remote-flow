@@ -1,0 +1,169 @@
+# Remote Flow — single-node production stack (OPS-1, §3.2, HW-1/HW-2).
+#
+#   cp deploy/.env.example deploy/.env   # then edit MASTER_KEY / PUBLIC_URL
+#   docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --build
+#
+# CPU priorities (HW-1) and memory limits (HW-2) are deliberate: interactive paths
+# (api, postgres) win over the render worker, which is the memory-hungry one.
+name: remote-flow
+
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql+asyncpg://remote_flow:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/remote_flow
+  REDIS_URL: redis://redis:6379/0
+  MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY (base64 of 32 random bytes)}
+  SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY}
+  STORAGE_DIR: /storage
+  PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
+  ENVIRONMENT: production
+  COOKIE_SECURE: ${COOKIE_SECURE:-false}
+  LLM_CONCURRENCY: ${LLM_CONCURRENCY:-16}
+  RENDER_CONCURRENCY: ${RENDER_CONCURRENCY:-1}
+  RB_PDF_BACKEND: ${RB_PDF_BACKEND:-unoserver}
+  AUTO_CREATE_SCHEMA: "false"
+  TZ: ${CONTAINER_TZ:-UTC}
+
+x-backend-base: &backend-base
+  build:
+    context: ..
+    dockerfile: backend/Dockerfile
+  restart: unless-stopped
+  env_file:
+    - .env
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  volumes:
+    - storage:/storage
+
+services:
+  caddy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    mem_limit: 128m
+    cpu_shares: 512
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+
+  api:
+    <<: *backend-base
+    environment:
+      <<: *backend-env
+    command: ["sh", "-c", "python manage.py migrate && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 --proxy-headers --forwarded-allow-ips='*'"]
+    mem_limit: 512m
+    cpu_shares: 1024
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz').status==200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  worker-llm:
+    <<: *backend-base
+    environment:
+      <<: *backend-env
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "llm", "-c", "${LLM_CONCURRENCY:-16}", "-P", "gevent", "--prefetch-multiplier", "1", "-l", "INFO", "-n", "llm@%h"]
+    mem_limit: 512m
+    cpu_shares: 512
+    stop_grace_period: 620s
+
+  worker-render:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.render
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      <<: *backend-env
+      RENDER_CONCURRENCY: "1"
+      RB_PDF_BACKEND: ${RB_PDF_BACKEND:-unoserver}
+      UNOSERVER_MAX_CONVERSIONS: "200"
+      UNOSERVER_MAX_RSS_MB: "700"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - storage:/storage
+    # HW-1: lowest CPU share plus nice -n 10 inside the entrypoint.
+    mem_limit: 1500m
+    cpu_shares: 256
+    stop_grace_period: 200s
+
+  worker-ops:
+    <<: *backend-base
+    environment:
+      <<: *backend-env
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "ops", "-c", "2", "-P", "gevent", "-B", "-l", "INFO", "-n", "ops@%h"]
+    mem_limit: 192m
+    cpu_shares: 512
+    stop_grace_period: 60s
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: remote_flow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: remote_flow
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    mem_limit: 1500m
+    cpu_shares: 1024
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U remote_flow -d remote_flow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --maxmemory
+      - 200mb
+      - --maxmemory-policy
+      - noeviction
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    volumes:
+      - redisdata:/data
+    mem_limit: 256m
+    cpu_shares: 512
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
+  redisdata:
+  storage:
+  caddy_data:
+  caddy_config:

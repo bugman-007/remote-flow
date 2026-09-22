@@ -1,0 +1,2 @@
+# LLM provider client (LiteLLM). Kept separate so the render image stays small.
+litellm>=1.40
