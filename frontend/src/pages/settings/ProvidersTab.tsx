@@ -217,8 +217,8 @@ function ProviderDialog({
           <Button variant="outline" onClick={onClose} disabled={busy}>
             {t("common.cancel")}
           </Button>
-          <Button onClick={() => void submit()} disabled={busy || !draft.display_name}>
-            {busy ? t("common.saving") : t("common.save")}
+          <Button onClick={() => void submit()} loading={busy} disabled={!draft.display_name}>
+            {t("common.save")}
           </Button>
         </>
       }

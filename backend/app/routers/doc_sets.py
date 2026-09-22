@@ -191,6 +191,7 @@ async def _interview_counts(session: AsyncSession, doc_set_ids: list[str]) -> di
 
 SORT_KEYS = {
     "seq": lambda row: (row["submitted_date"] or "", row["seq_no"]),
+    "submitted": lambda row: (str(row.get("submitted_at") or row["submitted_date"] or ""), row["seq_no"]),
     "company": lambda row: ((row.get("doc_set") or {}).get("company_name") or "").lower(),
     "status": lambda row: ((row.get("status") or {}).get("status") or "", row["seq_no"]),
     "ready": lambda row: (row.get("released_at") or "", row["seq_no"]),

@@ -226,8 +226,8 @@ function ThemeDialog({
           <Button variant="outline" onClick={onClose} disabled={busy}>
             {t("common.cancel")}
           </Button>
-          <Button onClick={() => void save()} disabled={busy || !name}>
-            {busy ? t("common.saving") : t("common.save")}
+          <Button onClick={() => void save()} loading={busy} disabled={!name}>
+            {t("common.save")}
           </Button>
         </>
       }

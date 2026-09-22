@@ -96,7 +96,10 @@ export function ResumesTable({
               {t("resumes.columns.status")}
               {sortArrow("status")}
             </th>
-            <th>{t("resumes.columns.submitted")}</th>
+            <th className="cursor-pointer" onClick={() => onSort("submitted")}>
+              {t("resumes.columns.submitted")}
+              {sortArrow("submitted")}
+            </th>
             <th className="cursor-pointer" onClick={() => onSort("ready")}>
               {t("resumes.columns.ready")}
               {sortArrow("ready")}
@@ -106,12 +109,14 @@ export function ResumesTable({
           </tr>
         </thead>
         <tbody>
-          <TableState
-            loading={loading}
-            error={error ? errorMessage(error) : undefined}
-            empty={t("common.noResults")}
-            colSpan={columns + 1}
-          />
+          {loading || error || rows.length === 0 ? (
+            <TableState
+              loading={loading}
+              error={error ? errorMessage(error) : undefined}
+              empty={t("common.noResults")}
+              colSpan={columns + 1}
+            />
+          ) : null}
           {!loading && !error
             ? rows.map((row) => {
                 const ready = row.status?.status === "released";
@@ -293,7 +298,7 @@ export function ResumesTable({
               {t("common.cancel")}
             </Button>
             <Button
-              disabled={busy}
+              loading={busy}
               onClick={() => {
                 if (!regenerating) return;
                 void act(() => api.post(`/doc-sets/${regenerating.doc_set_id}/regenerate`), t("toast.regenerating")).then(() =>
@@ -349,8 +354,8 @@ function RenameDialog({
           <Button variant="outline" onClick={onClose} disabled={busy}>
             {t("common.cancel")}
           </Button>
-          <Button disabled={busy} onClick={() => void onSave({ company_name: company, job_title: title })}>
-            {busy ? t("common.saving") : t("common.save")}
+          <Button loading={busy} onClick={() => void onSave({ company_name: company, job_title: title })}>
+            {t("common.save")}
           </Button>
         </>
       }

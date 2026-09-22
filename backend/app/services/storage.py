@@ -109,10 +109,16 @@ async def zip_entries_async(entries: list[tuple[Path, str]]) -> io.BytesIO:
     return await asyncio.to_thread(zip_entries, entries)
 
 
-def doc_set_zip_folder(seq_no: int, company: str | None, role: str | None) -> str:
+def doc_set_zip_folder(submitted_at, company: str | None, role: str | None) -> str:
+    """Per-doc-set folder inside a ZIP: ``YYYY-MM-DD_HHMMSS_Company_Job-Title``.
+
+    The timestamp leads so that sorting the extracted folders by name matches the
+    Maker's submission (browser-tab) order.
+    """
+    stamp = submitted_at.strftime("%Y-%m-%d_%H%M%S") if submitted_at is not None else "undated"
     company_part = slugify(company, fallback="Company").replace("-", "_")
     role_part = slugify(role, fallback="Role").replace("-", "_")
-    return f"{seq_no:03d}_{company_part}_{role_part}"
+    return f"{stamp}_{company_part}_{role_part}"
 
 
 def download_filename(basename: str, kind: str) -> str:

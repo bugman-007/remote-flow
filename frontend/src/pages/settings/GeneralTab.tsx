@@ -24,6 +24,7 @@ export function GeneralTab() {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState<Settings | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
   const settings = useQuery({
     queryKey: ["settings"],
@@ -49,18 +50,21 @@ export function GeneralTab() {
 
   const save = async () => {
     setError(null);
+    setSaving(true);
     try {
       await api.patch("/settings", { values: draft });
       push({ tone: "success", title: t("settings.general.saved") });
       await queryClient.invalidateQueries({ queryKey: ["settings"] });
     } catch (caught) {
       setError(errorMessage(caught));
+    } finally {
+      setSaving(false);
     }
   };
 
   return (
     <Card>
-      <CardHeader title={t("settings.tabs.general")} description={t("profiles.snapshotNote")} actions={<Button size="sm" onClick={() => void save()}>{t("common.save")}</Button>} />
+      <CardHeader title={t("settings.tabs.general")} description={t("profiles.snapshotNote")} actions={<Button size="sm" onClick={() => void save()} loading={saving}>{t("common.save")}</Button>} />
       <div className="grid gap-3 tablet:grid-cols-2">
         {FIELDS.map((field) =>
           field.type === "checkbox" ? (

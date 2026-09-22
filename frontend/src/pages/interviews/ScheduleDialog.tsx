@@ -79,8 +79,8 @@ export function ScheduleDialog({ open, docSetId, onClose, onCreated }: Props) {
           <Button variant="outline" onClick={onClose} disabled={busy}>
             {t("common.cancel")}
           </Button>
-          <Button onClick={() => void submit()} disabled={busy}>
-            {busy ? t("common.saving") : t("common.save")}
+          <Button onClick={() => void submit()} loading={busy}>
+            {t("common.save")}
           </Button>
         </>
       }

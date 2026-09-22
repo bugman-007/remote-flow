@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import re
 import zipfile
 from datetime import date, timedelta
 
@@ -120,7 +121,12 @@ async def test_submit_run_pipeline_and_download_the_zip(api, workspace):
     assert len(names) == 3
     assert any(name.endswith(".pdf") for name in names)
     assert any(name.endswith(".docx") for name in names)
-    assert {name.split("/")[0] for name in names} == {"001_Company_API_to_join_the_platform_team_Senior_Full_Stack_Developer"}
+    folders = {name.split("/")[0] for name in names}
+    assert len(folders) == 1, folders
+    folder = folders.pop()
+    # RES-13: date-time first so extracted folders sort like the submission order.
+    assert re.match(r"^\d{4}-\d{2}-\d{2}_\d{6}_", folder), folder
+    assert folder.endswith("Company_API_to_join_the_platform_team_Senior_Full_Stack_Developer")
 
     # Individual file download is authorised for the owning maker.
     pdf = next(f for f in row["files"] if f["kind"] == "pdf")
@@ -730,3 +736,30 @@ async def test_doc_set_access_and_downloads_are_audited(api, workspace, db_sessi
     ).scalars().all()
     assert "file.download" in file_actions
     await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_maker_limit_exposes_jd_bounds(api, workspace):
+    """JD-3: the Maker UI reads the real bounds instead of a hardcoded cap."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    body = (await maker.get("/api/v1/me/limit")).json()
+    assert body["min_jd_chars"] == 50
+    assert body["max_jd_chars"] >= 200_000
+
+
+@pytest.mark.asyncio
+async def test_doc_sets_sort_by_submitted_time(api, workspace):
+    """RES-13: Makers can sort by submission time, not only by ready time."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    await submit_via_api(maker, "Sort check one: hiring a backend engineer at Company Sort One.", key="sort-1")
+    await submit_via_api(maker, "Sort check two: hiring a data engineer at Company Sort Two, remote.", key="sort-2")
+    await run_pipeline()
+
+    def seqs(payload):
+        return [row["seq_no"] for row in payload["items"]]
+
+    params = {"date": date.today().isoformat(), "sort": "submitted"}
+    newest = (await maker.get("/api/v1/doc-sets", params={**params, "order": "desc"})).json()
+    oldest = (await maker.get("/api/v1/doc-sets", params={**params, "order": "asc"})).json()
+    assert seqs(newest) == [2, 1]
+    assert seqs(oldest) == [1, 2]

@@ -8,6 +8,7 @@ import { Badge, Button, Card, Checkbox, EmptyState, Input, Select, Spinner } fro
 import { Pager } from "../ui/table";
 import { useToast } from "../ui/toast";
 import { DateSelector } from "../components/DateSelector";
+import { MultiSelect } from "../ui/MultiSelect";
 import { ResumesTable } from "./resumes/ResumesTable";
 import { DocSetDrawer } from "./resumes/DocSetDrawer";
 import { MakerStats } from "./resumes/MakerStats";
@@ -42,7 +43,11 @@ export function ResumesPage() {
   const { user } = useAuth();
   const { push } = useToast();
   const queryClient = useQueryClient();
-  const { state, update } = useUrlState(DEFAULTS);
+  const isManager = user?.role === "manager";
+  // RES-13: makers work through their browser tabs in submission order, so default
+  // their list (and therefore the download order) to submitted time.
+  const defaults = useMemo(() => ({ ...DEFAULTS, sort: isManager ? "seq" : "submitted" }), [isManager]);
+  const { state, update } = useUrlState(defaults);
   const { subscribe } = useRealtime();
   // RES-8: count live events that arrive while the list is scrolled away from the top.
   const [newRows, setNewRows] = useState(0);
@@ -50,7 +55,7 @@ export function ResumesPage() {
   const [selection, setSelection] = useState<string[]>([]);
   const [openRow, setOpenRow] = useState<DocSetRow | null>(null);
   const [showStats, setShowStats] = useState(false);
-  const isManager = user?.role === "manager";
+  const [busy, setBusy] = useState<string | null>(null);
   const rangeActive = Boolean(state.date_from && state.date_to);
 
   const query = useMemo(
@@ -116,17 +121,22 @@ export function ResumesPage() {
   const refresh = () => void queryClient.invalidateQueries({ queryKey: ["doc-sets"] });
 
   const downloadSelection = async () => {
-    if (!selection.length) return;
+    if (!selection.length || busy) return;
+    setBusy("selection");
     try {
       const blob = await api.requestBlob("/doc-sets/zip", { method: "POST", body: { ids: selection } });
       await downloadBlob(blob);
       push({ tone: "success", title: t("toast.downloaded") });
     } catch (error) {
       push({ tone: "error", title: errorMessage(error) });
+    } finally {
+      setBusy(null);
     }
   };
 
   const downloadDate = async () => {
+    if (busy) return;
+    setBusy("date");
     try {
       const blob = await api.requestBlob("/doc-sets/zip", {
         query: {
@@ -139,11 +149,14 @@ export function ResumesPage() {
       await downloadBlob(blob);
     } catch (error) {
       push({ tone: "error", title: errorMessage(error) });
+    } finally {
+      setBusy(null);
     }
   };
 
   const bulkSelect = async (selected: boolean) => {
-    if (!selection.length) return;
+    if (!selection.length || busy) return;
+    setBusy("bulk");
     try {
       await api.post("/doc-sets/bulk-select", { ids: selection, selected });
       push({ tone: "success", title: selected ? t("toast.selected", { count: selection.length }) : t("toast.unselected", { count: selection.length }) });
@@ -151,6 +164,8 @@ export function ResumesPage() {
       refresh();
     } catch (error) {
       push({ tone: "error", title: errorMessage(error) });
+    } finally {
+      setBusy(null);
     }
   };
 
@@ -175,13 +190,6 @@ export function ResumesPage() {
     downloadText(`resumes_${state.date || todayISO()}.csv`, csv);
   };
 
-  const toggleMaker = (makerId: string) => {
-    update({
-      maker_id: state.maker_id.includes(makerId) ? state.maker_id.filter((value) => value !== makerId) : [...state.maker_id, makerId],
-      page: 1,
-    });
-  };
-
   return (
     <div className="space-y-4">
       {newRows > 0 ? (
@@ -203,7 +211,7 @@ export function ResumesPage() {
         <div>
           <h1 className="text-lg font-semibold">{t("resumes.title")}</h1>
           <p className="text-sm text-muted-foreground">
-            {state.date || todayISO()}
+            {rangeActive ? `${state.date_from} → ${state.date_to}` : state.date || todayISO()}
             {state.maker_id.length ? ` · ${state.maker_id.length} maker(s)` : ""}
           </p>
         </div>
@@ -212,7 +220,7 @@ export function ResumesPage() {
             <FileDown className="h-3.5 w-3.5" />
             {t("resumes.exportCsv")}
           </Button>
-          <Button variant="outline" size="sm" onClick={downloadDate}>
+          <Button variant="outline" size="sm" onClick={() => void downloadDate()} loading={busy === "date"}>
             <Download className="h-3.5 w-3.5" />
             {t("resumes.downloadDate")}
           </Button>
@@ -239,7 +247,7 @@ export function ResumesPage() {
             onDate={(value) => update({ date: value, date_from: "", date_to: "", page: 1 })}
             range={{ from: state.date_from, to: state.date_to }}
             onRange={(value) => update({ date_from: value.from, date_to: value.to, page: 1 })}
-            withRange={isManager}
+            withRange
           />
           <Input
             className="h-8 w-full max-w-xs text-sm"
@@ -279,19 +287,12 @@ export function ResumesPage() {
                 </option>
               ))}
             </Select>
-            <span className="flex items-center gap-2">
-              {(makers.data?.items ?? []).slice(0, 6).map((maker) => (
-                <label key={maker.id} className="inline-flex cursor-pointer items-center gap-1">
-                  <input
-                    type="checkbox"
-                    className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
-                    checked={state.maker_id.includes(maker.id)}
-                    onChange={() => toggleMaker(maker.id)}
-                  />
-                  {maker.name}
-                </label>
-              ))}
-            </span>
+            <MultiSelect
+              placeholder={t("resumes.columns.maker")}
+              options={(makers.data?.items ?? []).map((maker) => ({ value: maker.id, label: maker.name }))}
+              values={state.maker_id}
+              onChange={(values) => update({ maker_id: values, page: 1 })}
+            />
             <Checkbox label={t("resumes.filterStatus.selected")} checked={state.selected} onChange={(event) => update({ selected: event.target.checked, page: 1 })} />
             <Checkbox label="Duplicates" checked={state.duplicates} onChange={(event) => update({ duplicates: event.target.checked, page: 1 })} />
             <Checkbox label="Multi-gen" checked={state.multi_generation} onChange={(event) => update({ multi_generation: event.target.checked, page: 1 })} />
@@ -303,12 +304,12 @@ export function ResumesPage() {
         {selection.length ? (
           <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/50 px-3 py-2 text-xs">
             <Badge tone="info">{t("common.rowsSelected", { count: selection.length })}</Badge>
-            <Button size="sm" variant="outline" onClick={() => void downloadSelection()}>
+            <Button size="sm" variant="outline" loading={busy === "selection"} onClick={() => void downloadSelection()}>
               {t("resumes.downloadSelected", { count: selection.length })}
             </Button>
             {isManager ? (
               <>
-                <Button size="sm" variant="outline" onClick={() => void bulkSelect(true)}>
+                <Button size="sm" variant="outline" loading={busy === "bulk"} onClick={() => void bulkSelect(true)}>
                   <Star className="h-3.5 w-3.5" />
                   {t("resumes.bulkSelect")}
                 </Button>

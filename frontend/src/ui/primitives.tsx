@@ -22,16 +22,20 @@ const SIZES: Record<Size, string> = {
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant;
   size?: Size;
+  /** Shows a spinner and blocks clicks while an action is in flight. */
+  loading?: boolean;
 }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
-  { className, variant = "primary", size = "md", type = "button", ...props },
+  { className, variant = "primary", size = "md", type = "button", loading = false, disabled, children, ...props },
   ref,
 ) {
   return (
     <button
       ref={ref}
       type={type}
+      disabled={disabled || loading}
+      aria-busy={loading || undefined}
       className={cn(
         "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md font-medium shadow-sm transition",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
@@ -41,7 +45,10 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
         className,
       )}
       {...props}
-    />
+    >
+      {loading ? <Spinner className="h-3.5 w-3.5 border-t-current" /> : null}
+      {children}
+    </button>
   );
 });
 

@@ -146,7 +146,7 @@ async def build_zip(
         if len(files) < 3:
             skipped += 1
             continue
-        folder = storage.doc_set_zip_folder(job.seq_no, doc_set.company_name, doc_set.job_title)
+        folder = storage.doc_set_zip_folder(job.submitted_at, doc_set.company_name, doc_set.job_title)
         for artifact in files:
             try:
                 entries.append((storage.safe_relative(artifact.path), f"{folder}/{artifact.filename}"))

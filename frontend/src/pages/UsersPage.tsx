@@ -306,8 +306,8 @@ function UserDialog({
           <Button variant="outline" onClick={onClose} disabled={busy}>
             {t("common.cancel")}
           </Button>
-          <Button onClick={() => void submit()} disabled={busy || !draft.name || !draft.email}>
-            {busy ? t("common.saving") : t("common.save")}
+          <Button onClick={() => void submit()} loading={busy} disabled={!draft.name || !draft.email}>
+            {t("common.save")}
           </Button>
         </>
       }

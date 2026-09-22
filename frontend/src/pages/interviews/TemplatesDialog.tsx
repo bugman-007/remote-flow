@@ -260,8 +260,8 @@ export function TemplatesDialog({ open, onClose }: { open: boolean; onClose: () 
                 {t("common.delete")}
               </Button>
             ) : null}
-            <Button onClick={() => void save()} disabled={busy}>
-              {busy ? t("common.saving") : t("common.save")}
+            <Button onClick={() => void save()} loading={busy}>
+              {t("common.save")}
             </Button>
           </div>
         </div>

@@ -19,6 +19,7 @@ import { t } from "../i18n";
 import { cn } from "../lib/utils";
 import { Badge, Button } from "../ui/primitives";
 import { ConnectionIndicator } from "../components/ConnectionIndicator";
+import { GlobalLoadingBar } from "../components/GlobalLoadingBar";
 import { ChangePasswordDialog } from "../pages/ChangePasswordDialog";
 import type { Role } from "../types";
 import { initials } from "../lib/format";
@@ -77,6 +78,7 @@ export function AppShell() {
 
   return (
     <div className="flex min-h-full bg-background">
+      <GlobalLoadingBar />
       <aside
         className={cn(
           "fixed inset-y-0 left-0 z-40 flex w-60 shrink-0 flex-col border-r border-border bg-card transition-transform tablet:static tablet:translate-x-0",

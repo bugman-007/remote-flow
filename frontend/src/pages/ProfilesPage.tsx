@@ -11,7 +11,7 @@ import { formatDate, formatDateTime } from "../lib/format";
 import { parseList } from "../lib/utils";
 import type { Paginated, Profile, PromptVersion, Theme, User } from "../types";
 
-const SHAREABLE = ["Name", "URL", "Description", "Start date", "End date", "Tags"];
+const SHAREABLE = ["Name", "URL", "Information", "Tags"];
 
 export function ProfilesPage() {
   const { push } = useToast();
@@ -223,7 +223,7 @@ function ProfileDialog({
             {(["details", "prompt", "makers", "share"] as const).map((value) => (
               <Button key={value} size="sm" variant={tab === value ? "primary" : "outline"} onClick={() => setTab(value)}>
                 {value === "details"
-                  ? t("common.description")
+                  ? t("profiles.information")
                   : value === "prompt"
                     ? t("profiles.prompt")
                     : value === "makers"
@@ -250,9 +250,9 @@ function ProfileDialog({
                   {draft.status === "archived" ? t("profiles.unarchive") : t("profiles.archive")}
                 </Button>
               ) : null}
-              <Button size="sm" onClick={() => void save()} disabled={busy}>
+              <Button size="sm" onClick={() => void save()} loading={busy}>
                 <Save className="h-3.5 w-3.5" />
-                {busy ? t("common.saving") : t("common.save")}
+                {t("common.save")}
               </Button>
             </span>
           </div>
@@ -267,14 +267,8 @@ function ProfileDialog({
               <Field label={t("profiles.url")}>
                 <Input value={draft.url ?? ""} onChange={(event) => setDraft({ ...draft, url: event.target.value })} />
               </Field>
-              <Field label={t("common.description")} className="tablet:col-span-2">
+              <Field label={t("profiles.information")} className="tablet:col-span-2">
                 <Textarea value={draft.description ?? ""} onChange={(event) => setDraft({ ...draft, description: event.target.value })} />
-              </Field>
-              <Field label={t("profiles.startDate")}>
-                <Input type="date" value={draft.start_date ?? ""} onChange={(event) => setDraft({ ...draft, start_date: event.target.value })} />
-              </Field>
-              <Field label={t("profiles.endDate")}>
-                <Input type="date" value={draft.end_date ?? ""} onChange={(event) => setDraft({ ...draft, end_date: event.target.value })} />
               </Field>
               <Field label={t("profiles.theme")}>
                 <Select value={draft.theme_id ?? ""} onChange={(event) => setDraft({ ...draft, theme_id: event.target.value || null })}>
@@ -412,6 +406,8 @@ function PromptTab({
   const [testResult, setTestResult] = useState<{ json: unknown; call_log: unknown; candidate_name: string } | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
   const [openDiff, setOpenDiff] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
 
   const versions = useQuery({
     queryKey: ["prompt-versions", profileId],
@@ -420,7 +416,8 @@ function PromptTab({
   });
 
   const saveVersion = async () => {
-    if (!profileId) return;
+    if (!profileId || saving) return;
+    setSaving(true);
     try {
       await api.post(`/profiles/${profileId}/prompt-versions`, { body, change_note: note });
       setNote("");
@@ -429,12 +426,15 @@ function PromptTab({
       await queryClient.invalidateQueries({ queryKey: ["profile", profileId] });
     } catch (error) {
       push({ tone: "error", title: errorMessage(error) });
+    } finally {
+      setSaving(false);
     }
   };
 
   const runTest = async () => {
-    if (!profileId) return;
+    if (!profileId || testing) return;
     setTestError(null);
+    setTesting(true);
     try {
       const result = await api.post<{ json: unknown; call_log: unknown; candidate_name: string }>(`/profiles/${profileId}/test`, {
         jd_text: testJd,
@@ -443,6 +443,8 @@ function PromptTab({
     } catch (error) {
       setTestResult(null);
       setTestError(errorMessage(error));
+    } finally {
+      setTesting(false);
     }
   };
 
@@ -459,7 +461,7 @@ function PromptTab({
         <Field className="mb-0 flex-1" label={t("profiles.changeNote")}>
           <Input value={note} onChange={(event) => setNote(event.target.value)} />
         </Field>
-        <Button onClick={() => void saveVersion()} disabled={!profileId}>
+        <Button onClick={() => void saveVersion()} loading={saving} disabled={!profileId}>
           {t("profiles.saveVersion")}
         </Button>
       </div>
@@ -531,7 +533,7 @@ function PromptTab({
         <Field label={t("profiles.testJd")}>
           <Textarea value={testJd} onChange={(event) => setTestJd(event.target.value)} />
         </Field>
-        <Button size="sm" onClick={() => void runTest()} disabled={!profileId || testJd.trim().length < 50}>
+        <Button size="sm" onClick={() => void runTest()} loading={testing} disabled={!profileId || testJd.trim().length < 50}>
           {t("profiles.runTest")}
         </Button>
         {testError ? (

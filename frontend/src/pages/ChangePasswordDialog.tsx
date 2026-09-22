@@ -78,8 +78,8 @@ export function ChangePasswordDialog({
               {t("common.cancel")}
             </Button>
           )}
-          <Button type="submit" disabled={busy}>
-            {busy ? t("common.saving") : t("password.submit")}
+          <Button type="submit" loading={busy}>
+            {t("password.submit")}
           </Button>
         </div>
       </form>

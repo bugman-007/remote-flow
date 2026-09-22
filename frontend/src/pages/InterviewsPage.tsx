@@ -170,7 +170,9 @@ export function InterviewsPage() {
                 </tr>
               </thead>
               <tbody>
-                <TableState loading={false} error={interviews.error ? errorMessage(interviews.error) : undefined} empty={t("common.noResults")} colSpan={isManager ? 7 : 6} />
+                {interviews.error ? (
+                  <TableState loading={false} error={errorMessage(interviews.error)} empty={t("common.noResults")} colSpan={isManager ? 7 : 6} />
+                ) : null}
                 {rows.map((row) => (
                   <tr key={row.id} className="cursor-pointer hover:bg-accent/40" onClick={() => setOpenId(row.id)}>
                     <td className="font-medium">{row.doc_set?.company_name ?? "—"}</td>

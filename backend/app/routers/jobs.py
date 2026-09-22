@@ -265,12 +265,15 @@ async def skip_job(
 async def my_limit(user: User = Depends(maker_required), session: AsyncSession = Depends(get_session)):
     day = await intake.server_today(session)
     used = await intake.usage_today(session, user.id, day)
+    settings = await settings_store.all_settings(session)
     return {
         "daily_limit": user.daily_limit,
         "used": used,
         "remaining": None if user.daily_limit is None else max(user.daily_limit - used, 0),
         "date": day,
         "paused": (await settings_store.intake_paused(session))[0],
+        "min_jd_chars": int(settings["min_jd_chars"]),
+        "max_jd_chars": int(settings["max_jd_chars"]),
     }
 
 

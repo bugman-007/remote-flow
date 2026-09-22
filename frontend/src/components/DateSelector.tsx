@@ -1,9 +1,22 @@
 import { CalendarDays } from "lucide-react";
 import { Button, Input } from "../ui/primitives";
 import { t } from "../i18n";
-import { shiftDate, todayISO } from "../lib/format";
+import { todayISO } from "../lib/format";
 
-/** RES-1: calendar input plus Today / Yesterday shortcuts; managers also get a range. */
+/** The first day of the current week (Monday) as ``YYYY-MM-DD``. */
+export function weekStart(today = todayISO()): string {
+  const day = new Date(`${today}T00:00:00Z`);
+  const weekday = (day.getUTCDay() + 6) % 7; // Monday = 0
+  day.setUTCDate(day.getUTCDate() - weekday);
+  return day.toISOString().slice(0, 10);
+}
+
+/** The first day of the current month as ``YYYY-MM-DD``. */
+export function monthStart(today = todayISO()): string {
+  return `${today.slice(0, 7)}-01`;
+}
+
+/** RES-1: calendar input plus Today / This week / This month shortcuts and a custom range. */
 export function DateSelector({
   date,
   onDate,
@@ -19,6 +32,15 @@ export function DateSelector({
 }) {
   const today = todayISO();
   const useRange = withRange && Boolean(range && range.from && range.to);
+  const inWeek = useRange && range?.from === weekStart(today) && range?.to === today;
+  const inMonth = useRange && range?.from === monthStart(today) && range?.to === today;
+  const pickRange = (from: string) => {
+    if (withRange && onRange) {
+      onRange({ from, to: today });
+    } else {
+      onDate(today);
+    }
+  };
   return (
     <div className="flex flex-wrap items-center gap-2">
       <CalendarDays className="h-4 w-4 text-muted-foreground" />
@@ -28,11 +50,14 @@ export function DateSelector({
         value={date}
         onChange={(event) => onDate(event.target.value)}
       />
-      <Button size="sm" variant={date === today ? "primary" : "outline"} onClick={() => onDate(today)}>
+      <Button size="sm" variant={!useRange && date === today ? "primary" : "outline"} onClick={() => onDate(today)}>
         {t("common.today")}
       </Button>
-      <Button size="sm" variant={date === shiftDate(today, -1) ? "primary" : "outline"} onClick={() => onDate(shiftDate(today, -1))}>
-        {t("common.yesterday")}
+      <Button size="sm" variant={inWeek ? "primary" : "outline"} onClick={() => pickRange(weekStart(today))}>
+        {t("common.thisWeek")}
+      </Button>
+      <Button size="sm" variant={inMonth ? "primary" : "outline"} onClick={() => pickRange(monthStart(today))}>
+        {t("common.thisMonth")}
       </Button>
       {withRange && range && onRange ? (
         <span className="flex items-center gap-1">
