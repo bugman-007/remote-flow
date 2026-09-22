@@ -265,20 +265,67 @@ export interface InterviewTemplate {
   created_at: string;
 }
 
+export interface InterviewStep {
+  id: string;
+  name: string;
+  color: string | null;
+  position: number;
+  is_active: boolean;
+}
+
+export interface InterviewStatus {
+  id: string;
+  name: string;
+  color: string | null;
+  position: number;
+  is_active: boolean;
+}
+
+export interface InterviewStepRecord {
+  id: string;
+  step_id: string | null;
+  step_name: string | null;
+  step_color: string | null;
+  position: number;
+  reviewer_id: string | null;
+  reviewer_name: string | null;
+  done: boolean;
+  rejected: boolean;
+  note: string | null;
+  done_at: string | null;
+  created_at: string;
+}
+
+export interface InterviewAttachment {
+  id: string;
+  kind: "resume" | "jd" | string;
+  filename: string;
+  content_type: string | null;
+  size_bytes: number | null;
+}
+
 export interface Interview {
   id: string;
-  doc_set_id: string;
-  generation_id: string;
+  doc_set_id: string | null;
+  generation_id: string | null;
   pinned_generation_no: number | null;
   newer_generation_available: boolean;
-  reviewer_id: string;
+  reviewer_id: string | null;
   reviewer_name: string | null;
-  template_id: string;
+  template_id: string | null;
   template_snapshot: { id?: string; name?: string; fields: InterviewTemplateField[] } | null;
   values: Record<string, unknown>;
   meeting_at: string | null;
   meeting_tz: string | null;
   status: "scheduled" | "completed" | "cancelled" | "no_show";
+  status_id: string | null;
+  status_label: InterviewStatus | null;
+  tech_stack: string | null;
+  company_name: string | null;
+  job_title: string | null;
+  candidate_name: string | null;
+  steps: InterviewStepRecord[];
+  attachments: InterviewAttachment[];
   created_by: string | null;
   cancelled_at: string | null;
   seen_by_reviewer_at: string | null;

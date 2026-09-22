@@ -462,11 +462,61 @@ class InterviewTemplate(PkMixin, Base):
     created_by: Mapped[str | None] = mapped_column(GUID, ForeignKey("users.id"))
 
 
+class InterviewStep(PkMixin, Base):
+    """INT-14: the Manager's ordered interview stages (Phone call, Tech, Final…)."""
+
+    __tablename__ = "interview_steps"
+
+    name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    color: Mapped[str | None] = mapped_column(String(32))
+    position: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class InterviewStatus(PkMixin, Base):
+    """INT-14: Manager-defined status labels (Scheduled, Rescheduled, Done…)."""
+
+    __tablename__ = "interview_statuses"
+
+    name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    color: Mapped[str | None] = mapped_column(String(32))
+    position: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class InterviewStepRecord(PkMixin, Base):
+    """INT-15: one hop of an interview — who handled which step, and how it went."""
+
+    __tablename__ = "interview_step_records"
+
+    interview_id: Mapped[str] = mapped_column(GUID, ForeignKey("interviews.id"), index=True, nullable=False)
+    step_id: Mapped[str | None] = mapped_column(GUID, ForeignKey("interview_steps.id"))
+    position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reviewer_id: Mapped[str | None] = mapped_column(GUID, ForeignKey("users.id"), index=True)
+    done: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    rejected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    done_at: Mapped[datetime | None] = mapped_column(DateTimeTZ)
+
+
+class InterviewAttachment(PkMixin, Base):
+    """INT-16: resumes/JDs attached to a manually created interview (attached as-is)."""
+
+    __tablename__ = "interview_attachments"
+
+    interview_id: Mapped[str | None] = mapped_column(GUID, ForeignKey("interviews.id"), index=True)
+    kind: Mapped[str] = mapped_column(enum_col("resume", "jd", name="interview_attachment_kind"), nullable=False)
+    filename: Mapped[str] = mapped_column(String(300), nullable=False)
+    path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    content_type: Mapped[str | None] = mapped_column(String(200))
+    size_bytes: Mapped[int | None] = mapped_column(Integer)
+
+
 class Interview(PkMixin, Base):
     __tablename__ = "interviews"
 
-    doc_set_id: Mapped[str] = mapped_column(GUID, ForeignKey("doc_sets.id"), index=True, nullable=False)
-    generation_id: Mapped[str] = mapped_column(GUID, ForeignKey("generations.id"), nullable=False)
+    doc_set_id: Mapped[str | None] = mapped_column(GUID, ForeignKey("doc_sets.id"), index=True)
+    generation_id: Mapped[str | None] = mapped_column(GUID, ForeignKey("generations.id"))
     reviewer_id: Mapped[str | None] = mapped_column(GUID, ForeignKey("users.id"), index=True)
     template_id: Mapped[str | None] = mapped_column(GUID, ForeignKey("interview_templates.id"))
     template_snapshot: Mapped[dict | None] = mapped_column(JSONType, default=dict)
@@ -479,11 +529,21 @@ class Interview(PkMixin, Base):
         nullable=False,
         index=True,
     )
+    tech_stack: Mapped[str | None] = mapped_column(String(500))
+    status_id: Mapped[str | None] = mapped_column(GUID, ForeignKey("interview_statuses.id"), index=True)
+    #: INT-16: copied from the doc set (or typed by hand for a manual interview)
+    #: so lists and search work the same for both kinds.
+    company_name: Mapped[str | None] = mapped_column(String(300), index=True)
+    job_title: Mapped[str | None] = mapped_column(String(300))
+    candidate_name: Mapped[str | None] = mapped_column(String(300))
     created_by: Mapped[str | None] = mapped_column(GUID, ForeignKey("users.id"))
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTimeTZ)
     seen_by_reviewer_at: Mapped[datetime | None] = mapped_column(DateTimeTZ)
 
     doc_set: Mapped[DocSet] = relationship(back_populates="interviews")
+    step_records: Mapped[list["InterviewStepRecord"]] = relationship(
+        order_by="InterviewStepRecord.position"
+    )
     feedback: Mapped[list["Feedback"]] = relationship(
         back_populates="interview", order_by="Feedback.version_no"
     )

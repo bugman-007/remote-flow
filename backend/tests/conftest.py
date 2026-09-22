@@ -97,11 +97,12 @@ async def db_session(engine):
 async def workspace(db_session):
     """Seed the standard demo data and hand back the object graph."""
     from app.services import settings_store
-    from app.services.seeds import seed_demo_data
+    from app.services.seeds import ensure_interview_taxonomy, seed_demo_data
     from app.services.theme import seed_default_theme
 
     await settings_store.ensure_defaults(db_session)
     await seed_default_theme(db_session)
+    await ensure_interview_taxonomy(db_session)
     info = await seed_demo_data(db_session)
     await db_session.commit()
 

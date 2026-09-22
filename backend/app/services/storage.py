@@ -6,6 +6,7 @@ import asyncio
 import io
 import os
 import shutil
+import uuid
 import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -43,6 +44,20 @@ def attempts_dir(doc_set_path: Path, stage: str, attempt_no: int) -> Path:
 
 def generation_dir(doc_set_path: Path, generation_no: int) -> Path:
     return doc_set_path / f"gen-{generation_no:02d}"
+
+
+def interview_attachment_dir(owner_id: str) -> Path:
+    return storage_root() / "interview-attachments" / owner_id
+
+
+def store_interview_attachment(*, interview_id: str, kind: str, filename: str, payload: bytes) -> StoredFile:
+    """INT-16: write an uploaded resume/JD as-is (no conversion, no pipeline)."""
+    safe_name = slugify(Path(filename).stem, fallback=kind)
+    suffix = Path(filename).suffix.lower() or ".bin"
+    target = interview_attachment_dir(interview_id) / f"{uuid.uuid4().hex[:8]}_{safe_name}{suffix}"
+    ensure_dir(target.parent)
+    target.write_bytes(payload)
+    return stat_file(target, kind=kind)
 
 
 def tmp_dir() -> Path:

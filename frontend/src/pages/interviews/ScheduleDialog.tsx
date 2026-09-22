@@ -6,7 +6,7 @@ import { Button, Checkbox, ErrorNote, Field, Input, Select, Textarea } from "../
 import { useToast } from "../../ui/toast";
 import { t } from "../../i18n";
 import { todayISO } from "../../lib/format";
-import type { InterviewTemplate, InterviewTemplateField, Paginated, User } from "../../types";
+import type { InterviewStep, InterviewTemplate, InterviewTemplateField, Paginated, User } from "../../types";
 
 /** INT-3: fields the dialog renders itself, so templates must not duplicate them. */
 const MANAGED_FIELDS = new Set(["reviewer", "meeting_time", "location"]);
@@ -23,6 +23,7 @@ export function ScheduleDialog({ open, docSetId, onClose, onCreated }: Props) {
   const { push } = useToast();
   const [templateId, setTemplateId] = useState("");
   const [reviewerId, setReviewerId] = useState("");
+  const [stepId, setStepId] = useState("");
   const [meetingDate, setMeetingDate] = useState(todayISO());
   const [startTime, setStartTime] = useState("");
   const [endTime, setEndTime] = useState("");
@@ -39,6 +40,12 @@ export function ScheduleDialog({ open, docSetId, onClose, onCreated }: Props) {
   const reviewers = useQuery({
     queryKey: ["users", { role: "reviewer" }],
     queryFn: () => api.get<Paginated<User>>("/users", { role: "reviewer", page_size: 200 }),
+    enabled: open,
+  });
+
+  const taxonomy = useQuery({
+    queryKey: ["interview-taxonomy"],
+    queryFn: () => api.get<{ steps: InterviewStep[] }>("/interview-taxonomy"),
     enabled: open,
   });
 
@@ -67,6 +74,7 @@ export function ScheduleDialog({ open, docSetId, onClose, onCreated }: Props) {
       await api.post("/interviews", {
         doc_set_id: docSetId,
         reviewer_id: reviewerId || null,
+        step_id: stepId || null,
         template_id: activeTemplate?.id ?? null,
         values: {
           ...values,
@@ -122,6 +130,16 @@ export function ScheduleDialog({ open, docSetId, onClose, onCreated }: Props) {
             {(reviewers.data?.items ?? []).map((reviewer) => (
               <option key={reviewer.id} value={reviewer.id}>
                 {reviewer.name}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label={t("interviews.step")}>
+          <Select value={stepId} onChange={(event) => setStepId(event.target.value)}>
+            <option value="">—</option>
+            {(taxonomy.data?.steps ?? []).map((step) => (
+              <option key={step.id} value={step.id}>
+                {step.name}
               </option>
             ))}
           </Select>

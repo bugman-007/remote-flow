@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,10 +16,14 @@ from app.errors import APIError
 from app.models import (
     AuditLog,
     DocSet,
+    InterviewAttachment,
     Feedback,
     Generation,
     Interview,
     InterviewEvent,
+    InterviewStatus,
+    InterviewStep,
+    InterviewStepRecord,
     InterviewTemplate,
     Job,
     Profile,
@@ -31,10 +37,12 @@ from app.schemas import (
     InterviewRequest,
     InterviewTemplateRequest,
     InterviewUpdate,
+    StepRecordRequest,
+    StepRecordUpdate,
     UseGenerationRequest,
 )
 from app.serializers import feedback_out, file_out, interview_out, profile_out, template_out
-from app.services import events
+from app.services import events, storage, taxonomy
 from app.utils import utcnow
 
 router = APIRouter(tags=["interviews"], dependencies=[Depends(csrf_protect)])
@@ -68,12 +76,27 @@ def _ensure_interview_access(user: User, interview: Interview) -> None:
     raise APIError("not_found", "Interview not found.", status_code=404)
 
 
-async def _interview_out(session: AsyncSession, interview: Interview, *, user: User) -> dict:
-    doc_set = await session.get(DocSet, interview.doc_set_id)
+async def _interview_out(session: AsyncSession, interview: Interview, *, user: User, steps: list[dict] | None = None) -> dict:
+    doc_set = await session.get(DocSet, interview.doc_set_id) if interview.doc_set_id else None
     job = await session.get(Job, doc_set.job_id) if doc_set else None
     reviewer = await session.get(User, interview.reviewer_id) if interview.reviewer_id else None
-    generation = await session.get(Generation, interview.generation_id)
+    generation = await session.get(Generation, interview.generation_id) if interview.generation_id else None
     files = await files_for_generation(session, interview.generation_id) if generation else []
+    status_row = await session.get(InterviewStatus, interview.status_id) if interview.status_id else None
+    attachments = [
+        {
+            "id": row.id,
+            "kind": row.kind,
+            "filename": row.filename,
+            "content_type": row.content_type,
+            "size_bytes": row.size_bytes,
+        }
+        for row in (
+            await session.execute(
+                select(InterviewAttachment).where(InterviewAttachment.interview_id == interview.id)
+            )
+        ).scalars().all()
+    ]
     profile_payload = None
     if user.role == "manager" and job and job.profile_id:
         profile = await session.get(Profile, job.profile_id)
@@ -92,6 +115,9 @@ async def _interview_out(session: AsyncSession, interview: Interview, *, user: U
         files=[file_out(f) for f in files if getattr(f, "kind", "") in {"pdf", "docx", "txt"}],
         profile=profile_payload,
         pinned_generation_no=generation.generation_no if generation else None,
+        status_label=taxonomy.status_out(status_row) if status_row else None,
+        steps=steps if steps is not None else (await taxonomy.step_records_out(session, [interview.id])).get(interview.id, []),
+        attachments=attachments,
     )
     if user.role == "reviewer":
         payload["job"] = {"seq_no": job.seq_no} if job else None
@@ -187,10 +213,13 @@ def _validate_fields(fields: list[dict]) -> None:
 @router.get("/interviews")
 async def list_interviews(
     status: str | None = None,
-    tab: str | None = Query(default=None, description="upcoming|past|selected"),
+    tab: str | None = Query(default=None, description="upcoming|past|selected|todo|done|all"),
+    flow: str | None = Query(default=None, description="INT-14: all|new|done"),
     reviewer_id: str | None = None,
     maker_id: str | None = None,
-    profile_id: str | None = None,
+    profile_id: list[str] | None = Query(default=None),
+    step_id: list[str] | None = Query(default=None),
+    status_id: list[str] | None = Query(default=None),
     date_from: datetime | None = None,
     date_to: datetime | None = None,
     q: str | None = None,
@@ -234,17 +263,39 @@ async def list_interviews(
         query = query.where(Interview.reviewer_id == reviewer_id)
     if status:
         query = query.where(Interview.status == status)
+    if flow == "new":
+        query = query.where(Interview.status == "scheduled")
+    elif flow == "done":
+        query = query.where(Interview.status == "completed")
     if maker_id:
-        query = query.join(DocSet, DocSet.id == Interview.doc_set_id).join(Job, Job.id == DocSet.job_id).where(Job.maker_id == maker_id)
+        sub = select(DocSet.id).join(Job, Job.id == DocSet.job_id).where(Job.maker_id == maker_id)
+        query = query.where(Interview.doc_set_id.in_(sub))
+    if profile_id:
+        sub = select(DocSet.id).join(Job, Job.id == DocSet.job_id).where(Job.profile_id.in_(profile_id))
+        query = query.where(Interview.doc_set_id.in_(sub))
+    if step_id:
+        sub = select(InterviewStepRecord.interview_id).where(InterviewStepRecord.step_id.in_(step_id))
+        query = query.where(Interview.id.in_(sub))
+    if status_id:
+        query = query.where(Interview.status_id.in_(status_id))
     if date_from:
         query = query.where(Interview.meeting_at >= date_from)
     if date_to:
         query = query.where(Interview.meeting_at <= date_to)
     if q:
-        sub = select(DocSet.id).where(
-            or_(DocSet.company_name.ilike(f"%{q}%"), DocSet.job_title.ilike(f"%{q}%"))
+        term = q.strip()
+        ds_sub = select(DocSet.id).where(
+            or_(DocSet.company_name.ilike(f"%{term}%"), DocSet.job_title.ilike(f"%{term}%"))
         )
-        query = query.where(Interview.doc_set_id.in_(sub))
+        query = query.where(
+            or_(
+                Interview.doc_set_id.in_(ds_sub),
+                Interview.company_name.ilike(f"%{term}%"),
+                Interview.job_title.ilike(f"%{term}%"),
+                Interview.candidate_name.ilike(f"%{term}%"),
+                Interview.tech_stack.ilike(f"%{term}%"),
+            )
+        )
     interviews = (await session.execute(query)).scalars().all()
     now = utcnow()
     if tab == "todo":
@@ -266,7 +317,13 @@ async def list_interviews(
         interviews.sort(key=lambda item: item.meeting_at or now)
     total = len(interviews)
     page_items = interviews[(page - 1) * page_size : (page - 1) * page_size + page_size]
-    payload = [await _interview_out(session, interview, user=user) for interview in page_items]
+    steps_by_interview = await taxonomy.step_records_out(session, [item.id for item in page_items])
+    payload = [
+        await _interview_out(
+            session, interview, user=user, steps=steps_by_interview.get(interview.id, [])
+        )
+        for interview in page_items
+    ]
     counts: dict[str, int] | None = None
     if user.role == "reviewer":
         # Counts stay independent of the active tab so the badge never flickers off.
@@ -303,13 +360,24 @@ async def create_interview(
     user: User = Depends(manager_required),
     session: AsyncSession = Depends(get_session),
 ):
-    doc_set = await session.get(DocSet, payload.doc_set_id)
-    if doc_set is None:
-        raise APIError("not_found", "Doc set not found.", status_code=404)
-    job = await session.get(Job, doc_set.job_id)
-    if doc_set.current_generation_id is None or (job and job.delivery_status != "released"):
-        raise APIError("not_ready", "Only released doc sets can be scheduled.", status_code=409)
-    generation = await session.get(Generation, doc_set.current_generation_id)
+    manual = payload.doc_set_id is None
+    doc_set = None
+    job = None
+    generation = None
+    if manual:
+        # INT-16: a hand-made interview carries its own company/title and attachments.
+        if not (payload.company_name or "").strip() or not (payload.job_title or "").strip():
+            raise APIError("missing_company", "Company and job title are required.", status_code=422)
+        if not payload.attachment_ids:
+            raise APIError("missing_files", "Attach a resume and a job description.", status_code=422)
+    else:
+        doc_set = await session.get(DocSet, payload.doc_set_id)
+        if doc_set is None:
+            raise APIError("not_found", "Doc set not found.", status_code=404)
+        job = await session.get(Job, doc_set.job_id)
+        if doc_set.current_generation_id is None or (job and job.delivery_status != "released"):
+            raise APIError("not_ready", "Only released doc sets can be scheduled.", status_code=409)
+        generation = await session.get(Generation, doc_set.current_generation_id)
     template = await session.get(InterviewTemplate, payload.template_id) if payload.template_id else None
     if template is None:
         template = (
@@ -328,9 +396,14 @@ async def create_interview(
             meeting_at = datetime.fromisoformat(str(values["meeting_time"]).replace("Z", "+00:00"))
         except ValueError:
             raise APIError("invalid_meeting_time", "Meeting time is not a valid datetime.", status_code=422) from None
+    status_row = None
+    if payload.status_id:
+        status_row = await session.get(InterviewStatus, payload.status_id)
+    if status_row is None:
+        status_row = await taxonomy.status_by_name(session, taxonomy.SCHEDULED_LABEL)
     interview = Interview(
-        doc_set_id=doc_set.id,
-        generation_id=generation.id if generation else doc_set.current_generation_id,
+        doc_set_id=doc_set.id if doc_set else None,
+        generation_id=(generation.id if generation else doc_set.current_generation_id) if doc_set else None,
         reviewer_id=payload.reviewer_id,
         template_id=template.id if template else None,
         template_snapshot={
@@ -341,11 +414,43 @@ async def create_interview(
         values=values,
         meeting_at=meeting_at,
         meeting_tz=payload.meeting_tz,
-        status="scheduled",
+        status=taxonomy.lifecycle_for(status_row.name if status_row else None),
+        status_id=status_row.id if status_row else None,
+        tech_stack=(payload.tech_stack or "").strip() or None,
+        company_name=(payload.company_name or (doc_set.company_name if doc_set else None)),
+        job_title=(payload.job_title or (doc_set.job_title if doc_set else None)),
+        candidate_name=(payload.candidate_name or (doc_set.candidate_name if doc_set else None)),
         created_by=user.id,
     )
     session.add(interview)
     await session.flush()
+    # INT-15: every interview starts with its first step.
+    step_row = await session.get(InterviewStep, payload.step_id) if payload.step_id else None
+    if step_row is None:
+        step_row = (
+            await session.execute(
+                select(InterviewStep).where(InterviewStep.is_active.is_(True)).order_by(InterviewStep.position).limit(1)
+            )
+        ).scalar_one_or_none()
+    session.add(
+        InterviewStepRecord(
+            interview_id=interview.id,
+            step_id=step_row.id if step_row else None,
+            position=0,
+            reviewer_id=payload.reviewer_id,
+        )
+    )
+    if manual:
+        attachments = (
+            await session.execute(
+                select(InterviewAttachment).where(InterviewAttachment.id.in_(payload.attachment_ids))
+            )
+        ).scalars().all()
+        found = {row.kind for row in attachments}
+        if not {"resume", "jd"} <= found:
+            raise APIError("missing_files", "Attach both a resume and a job description.", status_code=422)
+        for row in attachments:
+            row.interview_id = interview.id
     session.add(
         InterviewEvent(interview_id=interview.id, type="created", actor_id=user.id,
                        details={"generation_no": generation.generation_no if generation else None})
@@ -359,7 +464,7 @@ async def create_interview(
             session,
             audience={"user_ids": [interview.reviewer_id], "roles": []},
             event_type="interview.assigned",
-            payload={"interview_id": interview.id, "doc_set_id": doc_set.id},
+            payload={"interview_id": interview.id, "doc_set_id": doc_set.id if doc_set else None},
         )
     await session.commit()
     return await _interview_out(session, interview, user=user)
@@ -419,9 +524,18 @@ async def update_interview(
         reviewer = await session.get(User, changes["reviewer_id"])
         if reviewer is None or reviewer.role != "reviewer":
             raise APIError("invalid_reviewer", "Reviewer not found.", status_code=400)
+    if "status_id" in changes and changes["status_id"]:
+        status_row = await session.get(InterviewStatus, changes["status_id"])
+        if status_row is None:
+            raise APIError("not_found", "Status not found.", status_code=404)
+        interview.status_id = status_row.id
+        interview.status = taxonomy.lifecycle_for(status_row.name)
+        if status_row.name == taxonomy.CANCELLED_LABEL:
+            interview.cancelled_at = utcnow()
     for key, value in changes.items():
-        if key == "template_id":
-            interview.template_id = value
+        if key in {"template_id", "status_id"}:
+            if key == "template_id":
+                interview.template_id = value
             continue
         setattr(interview, key, value)
     if changes.get("status") == "cancelled":
@@ -684,3 +798,174 @@ async def mark_seen(
     interview.seen_by_reviewer_at = utcnow()
     await session.commit()
     return {"ok": True}
+
+
+# ------------------------------------------------- INT-15: per-step history
+
+
+async def _step_records(session: AsyncSession, interview_id: str) -> list[InterviewStepRecord]:
+    return (
+        await session.execute(
+            select(InterviewStepRecord)
+            .where(InterviewStepRecord.interview_id == interview_id)
+            .order_by(InterviewStepRecord.position, InterviewStepRecord.created_at)
+        )
+    ).scalars().all()
+
+
+@router.post("/interviews/{interview_id}/steps", status_code=201)
+async def add_step(
+    interview_id: str,
+    payload: StepRecordRequest,
+    user: User = Depends(manager_required),
+    session: AsyncSession = Depends(get_session),
+):
+    """INT-15: move the interview on to its next stage (and un-check Done)."""
+    interview = await _load_interview(session, interview_id)
+    records = await _step_records(session, interview.id)
+    if payload.step_id:
+        step = await session.get(InterviewStep, payload.step_id)
+        if step is None:
+            raise APIError("not_found", "Step not found.", status_code=404)
+    reviewer_id = payload.reviewer_id if payload.reviewer_id is not None else interview.reviewer_id
+    if reviewer_id:
+        reviewer = await session.get(User, reviewer_id)
+        if reviewer is None or reviewer.role != "reviewer":
+            raise APIError("invalid_reviewer", "Reviewer not found.", status_code=400)
+    session.add(
+        InterviewStepRecord(
+            interview_id=interview.id,
+            step_id=payload.step_id,
+            position=(records[-1].position + 1) if records else 0,
+            reviewer_id=reviewer_id,
+            note=payload.note,
+        )
+    )
+    interview.reviewer_id = reviewer_id
+    interview.cancelled_at = None
+    await taxonomy.apply_label(session, interview, taxonomy.SCHEDULED_LABEL)
+    session.add(
+        InterviewEvent(interview_id=interview.id, type="step.added", actor_id=user.id,
+                       details={"step_id": payload.step_id, "reviewer_id": reviewer_id})
+    )
+    if reviewer_id:
+        await events.emit(
+            session,
+            audience={"user_ids": [reviewer_id], "roles": []},
+            event_type="interview.assigned",
+            payload={"interview_id": interview.id},
+        )
+    await session.commit()
+    return await _interview_out(session, interview, user=user)
+
+
+@router.patch("/interviews/{interview_id}/steps/{record_id}")
+async def update_step(
+    interview_id: str,
+    record_id: str,
+    payload: StepRecordUpdate,
+    user: User = Depends(manager_required),
+    session: AsyncSession = Depends(get_session),
+):
+    """INT-15: Done / Rejected checkboxes and per-step reviewer changes."""
+    interview = await _load_interview(session, interview_id)
+    record = await session.get(InterviewStepRecord, record_id)
+    if record is None or record.interview_id != interview.id:
+        raise APIError("not_found", "Step not found.", status_code=404)
+    if payload.reviewer_id is not None:
+        if payload.reviewer_id:
+            reviewer = await session.get(User, payload.reviewer_id)
+            if reviewer is None or reviewer.role != "reviewer":
+                raise APIError("invalid_reviewer", "Reviewer not found.", status_code=400)
+        record.reviewer_id = payload.reviewer_id or None
+        interview.reviewer_id = record.reviewer_id
+    if payload.note is not None:
+        record.note = payload.note
+    if payload.done is not None:
+        record.done = payload.done
+        record.done_at = utcnow() if payload.done else None
+        if payload.done:
+            record.rejected = False
+            interview.cancelled_at = None
+            await taxonomy.apply_label(session, interview, taxonomy.DONE_LABEL)
+        else:
+            await taxonomy.apply_label(session, interview, taxonomy.SCHEDULED_LABEL)
+    if payload.rejected is not None:
+        record.rejected = payload.rejected
+        if payload.rejected:
+            record.done = False
+            record.done_at = None
+            interview.cancelled_at = utcnow()
+            await taxonomy.apply_label(session, interview, taxonomy.REJECTED_LABEL)
+        else:
+            interview.cancelled_at = None
+            await taxonomy.apply_label(session, interview, taxonomy.SCHEDULED_LABEL)
+    session.add(
+        InterviewEvent(interview_id=interview.id, type="step.updated", actor_id=user.id, details={"record_id": record.id})
+    )
+    if interview.reviewer_id:
+        await events.emit(
+            session,
+            audience={"user_ids": [interview.reviewer_id], "roles": []},
+            event_type="interview.updated",
+            payload={"interview_id": interview.id},
+        )
+    await session.commit()
+    return await _interview_out(session, interview, user=user)
+
+
+# ------------------------------------------- INT-16: manual interview files
+
+
+@router.post("/interviews/attachments", status_code=201)
+async def upload_interview_attachment(
+    kind: str = Form(...),
+    file: UploadFile = File(...),
+    user: User = Depends(manager_required),
+    session: AsyncSession = Depends(get_session),
+):
+    """INT-16: store a resume/JD as-is for a manually created interview."""
+    if kind not in {"resume", "jd"}:
+        raise APIError("invalid_kind", "kind must be resume or jd.", status_code=422)
+    suffix = Path(file.filename or "").suffix.lower()
+    allowed = {".pdf", ".docx", ".doc", ".txt", ".md", ".rtf"} if kind == "resume" else {".txt", ".md", ".pdf", ".docx"}
+    if suffix not in allowed:
+        raise APIError("invalid_file", f"Unsupported file type: {suffix or 'unknown'}", status_code=422)
+    payload = await file.read()
+    if len(payload) == 0:
+        raise APIError("invalid_file", "The file is empty.", status_code=422)
+    if len(payload) > 20 * 1024 * 1024:
+        raise APIError("invalid_file", "Files must be 20 MB or smaller.", status_code=413)
+    stored = storage.store_interview_attachment(
+        interview_id=str(user.id), kind=kind, filename=file.filename or f"{kind}{suffix}", payload=payload
+    )
+    row = InterviewAttachment(
+        interview_id=None,  # linked when the interview is created
+        kind=kind,
+        filename=stored.filename,
+        path=str(stored.path),
+        content_type=file.content_type,
+        size_bytes=stored.size_bytes,
+    )
+    session.add(row)
+    await session.commit()
+    return {"id": row.id, "kind": kind, "filename": row.filename, "size_bytes": row.size_bytes}
+
+
+@router.get("/interviews/{interview_id}/attachments/{attachment_id}")
+async def download_interview_attachment(
+    interview_id: str,
+    attachment_id: str,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    interview = await _load_interview(session, interview_id)
+    _ensure_interview_access(user, interview)
+    row = await session.get(InterviewAttachment, attachment_id)
+    if row is None or row.interview_id != interview.id:
+        raise APIError("not_found", "Attachment not found.", status_code=404)
+    return FileResponse(
+        row.path,
+        filename=row.filename,
+        media_type=row.content_type or "application/octet-stream",
+    )

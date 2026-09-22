@@ -119,6 +119,35 @@ class ThemeRequest(Model):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class TaxonomyRequest(Model):
+    """INT-14: a manager-defined interview step or status label."""
+
+    name: str = Field(min_length=1, max_length=120)
+    color: str | None = None
+
+
+class TaxonomyUpdate(Model):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    color: str | None = None
+    position: int | None = None
+    is_active: bool | None = None
+
+
+class StepRecordRequest(Model):
+    """INT-15: add a step hop to an interview."""
+
+    step_id: str | None = None
+    reviewer_id: str | None = None
+    note: str | None = None
+
+
+class StepRecordUpdate(Model):
+    reviewer_id: str | None = None
+    done: bool | None = None
+    rejected: bool | None = None
+    note: str | None = None
+
+
 class ThemePreviewRequest(Model):
     """SET-10: preview unsaved theme params inside the theme dialog."""
 
@@ -165,12 +194,21 @@ class InterviewTemplateRequest(Model):
 
 
 class InterviewRequest(Model):
-    doc_set_id: str
+    """INT-3/INT-14/INT-16: schedule an existing doc set or a hand-made interview."""
+
+    doc_set_id: str | None = None
     reviewer_id: str | None = None
     template_id: str | None = None
     values: dict[str, Any] = Field(default_factory=dict)
     meeting_at: datetime | None = None
     meeting_tz: str | None = None
+    step_id: str | None = None
+    status_id: str | None = None
+    tech_stack: str | None = None
+    company_name: str | None = None
+    job_title: str | None = None
+    candidate_name: str | None = None
+    attachment_ids: list[str] = Field(default_factory=list)
 
 
 class InterviewUpdate(Model):
@@ -180,6 +218,10 @@ class InterviewUpdate(Model):
     meeting_tz: str | None = None
     status: Literal["scheduled", "completed", "cancelled", "no_show"] | None = None
     template_id: str | None = None
+    status_id: str | None = None
+    tech_stack: str | None = None
+    company_name: str | None = None
+    job_title: str | None = None
 
 
 class FeedbackRequest(Model):

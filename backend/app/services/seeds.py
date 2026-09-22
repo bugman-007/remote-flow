@@ -5,10 +5,50 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import InterviewTemplate, LLMProvider, Profile, ProfileAssignment, PromptVersion, User
+from app.models import (
+    InterviewStatus,
+    InterviewStep,
+    InterviewTemplate,
+    LLMProvider,
+    Profile,
+    ProfileAssignment,
+    PromptVersion,
+    User,
+)
 from app.security import hash_password, normalise_email
 from app.services.theme import DEFAULT_THEME_NAME, seed_default_theme
 from app.services import settings_store
+
+#: INT-14: the stages a Manager can attach to an interview, in order.
+DEFAULT_INTERVIEW_STEPS = [
+    ("Phone call", "#38bdf8"),
+    ("Initial meeting", "#a78bfa"),
+    ("Tech meeting", "#34d399"),
+    ("Final meeting", "#fbbf24"),
+]
+
+#: INT-14: status labels; "Done"/"Cancelled"/"Rejected" are used by the checkboxes.
+DEFAULT_INTERVIEW_STATUSES = [
+    ("Scheduled", "#38bdf8"),
+    ("Rescheduled", "#fbbf24"),
+    ("Done", "#34d399"),
+    ("Cancelled", "#94a3b8"),
+    ("Rejected", "#f87171"),
+]
+
+
+async def ensure_interview_taxonomy(session: AsyncSession) -> None:
+    """Idempotently create the default steps and statuses (fresh installs too)."""
+    steps = (await session.execute(select(InterviewStep.name))).scalars().all()
+    for position, (name, color) in enumerate(DEFAULT_INTERVIEW_STEPS):
+        if name not in steps:
+            session.add(InterviewStep(name=name, color=color, position=position))
+    statuses = (await session.execute(select(InterviewStatus.name))).scalars().all()
+    for position, (name, color) in enumerate(DEFAULT_INTERVIEW_STATUSES):
+        if name not in statuses:
+            session.add(InterviewStatus(name=name, color=color, position=position))
+    await session.flush()
+
 
 DEFAULT_PROMPT = (
     "You are an expert technical resume writer. Rewrite the candidate's resume so it targets the "

@@ -942,3 +942,191 @@ async def test_theme_preview_renders_unsaved_params(api, workspace, fresh_client
 
     bad = await manager.post("/api/v1/themes/preview", json={"params": {"size": "huge"}})
     assert bad.status_code == 422, bad.text
+
+
+async def _scheduled_interview(api, workspace, fresh_client, client_key: str = "p3-1"):
+    """Helper: submit, run and schedule one interview; returns (manager, row, interview)."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    await submit_via_api(maker, f"Phase three: hiring a staff engineer at Company {client_key}.", key=client_key)
+    await run_pipeline()
+    row = (await maker.get("/api/v1/doc-sets", params={"date": date.today().isoformat()})).json()["items"][0]
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    created = await manager.post(
+        "/api/v1/interviews",
+        json={
+            "doc_set_id": row["doc_set_id"],
+            "reviewer_id": str(workspace["reviewer"].id),
+            "meeting_at": "2030-05-01T09:00:00+00:00",
+            "tech_stack": "Python, Postgres",
+        },
+    )
+    assert created.status_code == 201, created.text
+    return manager, row, created.json()
+
+
+@pytest.mark.asyncio
+async def test_interview_taxonomy_crud(api, workspace, fresh_client):
+    """INT-14: managers own the ordered step and status lists."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    taxonomy = (await manager.get("/api/v1/interview-taxonomy")).json()
+    assert [step["name"] for step in taxonomy["steps"]][:4] == [
+        "Phone call",
+        "Initial meeting",
+        "Tech meeting",
+        "Final meeting",
+    ]
+    assert {row["name"] for row in taxonomy["statuses"]} >= {"Scheduled", "Rescheduled", "Done", "Cancelled", "Rejected"}
+
+    created = await manager.post("/api/v1/interview-steps", json={"name": "Take-home review", "color": "#123456"})
+    assert created.status_code == 201, created.text
+    step_id = created.json()["id"]
+    assert created.json()["position"] == 4
+
+    clash = await manager.post("/api/v1/interview-steps", json={"name": "Take-home review"})
+    assert clash.status_code == 409
+
+    renamed = await manager.patch(f"/api/v1/interview-steps/{step_id}", json={"name": "Take-home", "position": 0})
+    assert renamed.json()["name"] == "Take-home"
+    assert renamed.json()["position"] == 0
+
+    assert (await manager.delete(f"/api/v1/interview-steps/{step_id}")).status_code == 200
+    assert (await manager.get("/api/v1/interview-steps")).json()["items"][0]["name"] == "Phone call"
+
+    status = await manager.post("/api/v1/interview-statuses", json={"name": "Offer", "color": "#00ff00"})
+    assert status.status_code == 201
+    assert (await manager.delete(f"/api/v1/interview-statuses/{status.json()['id']}")).status_code == 200
+
+    maker = await fresh_client("maker@example.com", workspace["password"])
+    assert (await maker.get("/api/v1/interview-taxonomy")).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_interview_steps_done_and_rejected(api, workspace, fresh_client):
+    """INT-15: Done/Rejected checkboxes drive the status label and the history."""
+    manager, _row, interview = await _scheduled_interview(api, workspace, fresh_client, "p3-steps")
+    assert interview["status_label"]["name"] == "Scheduled"
+    assert len(interview["steps"]) == 1
+    first = interview["steps"][0]
+    assert first["step_name"] == "Phone call"
+    assert first["done"] is False
+
+    done = await manager.patch(
+        f"/api/v1/interviews/{interview['id']}/steps/{first['id']}", json={"done": True}
+    )
+    assert done.status_code == 200, done.text
+    assert done.json()["status_label"]["name"] == "Done"
+    assert done.json()["status"] == "completed"
+    assert done.json()["steps"][0]["done_at"] is not None
+
+    # Adding the next step automatically un-checks Done and returns to Scheduled.
+    steps = (await manager.get("/api/v1/interview-steps")).json()["items"]
+    tech = next(step for step in steps if step["name"] == "Tech meeting")
+    added = await manager.post(
+        f"/api/v1/interviews/{interview['id']}/steps",
+        json={"step_id": tech["id"], "reviewer_id": str(workspace["reviewer"].id)},
+    )
+    assert added.status_code == 201, added.text
+    body = added.json()
+    assert body["status_label"]["name"] == "Scheduled"
+    assert body["status"] == "scheduled"
+    assert [step["step_name"] for step in body["steps"]] == ["Phone call", "Tech meeting"]
+    # The earlier step keeps the record that it was handled.
+    assert body["steps"][0]["done"] is True
+
+    current = body["steps"][1]
+    rejected = await manager.patch(
+        f"/api/v1/interviews/{interview['id']}/steps/{current['id']}", json={"rejected": True}
+    )
+    assert rejected.json()["status_label"]["name"] == "Rejected"
+    assert rejected.json()["steps"][1]["rejected"] is True
+    assert rejected.json()["steps"][1]["done"] is False
+
+    cleared = await manager.patch(
+        f"/api/v1/interviews/{interview['id']}/steps/{current['id']}", json={"rejected": False}
+    )
+    assert cleared.json()["status_label"]["name"] == "Scheduled"
+
+
+@pytest.mark.asyncio
+async def test_interview_filter_bar(api, workspace, fresh_client):
+    """INT-14: Step x All/New/Done x Profile x search filter the manager table."""
+    manager, row, interview = await _scheduled_interview(api, workspace, fresh_client, "p3-filter")
+    steps = (await manager.get("/api/v1/interview-steps")).json()["items"]
+    phone = next(step for step in steps if step["name"] == "Phone call")
+
+    params = {"flow": "new", "step_id": phone["id"]}
+    fresh = (await manager.get("/api/v1/interviews", params=params)).json()
+    assert [item["id"] for item in fresh["items"]] == [interview["id"]]
+    assert fresh["items"][0]["tech_stack"] == "Python, Postgres"
+
+    other = next(step for step in steps if step["name"] == "Final meeting")
+    assert (await manager.get("/api/v1/interviews", params={"step_id": other["id"]})).json()["items"] == []
+
+    profile_id = (await manager.get("/api/v1/profiles")).json()["items"][0]["id"]
+    assert len((await manager.get("/api/v1/interviews", params={"profile_id": profile_id})).json()["items"]) == 1
+    assert (await manager.get("/api/v1/interviews", params={"q": "Company p3-filter"})).json()["items"] != []
+    assert (await manager.get("/api/v1/interviews", params={"q": "nothing-matches"})).json()["items"] == []
+
+    first = interview["steps"][0]
+    await manager.patch(f"/api/v1/interviews/{interview['id']}/steps/{first['id']}", json={"done": True})
+    assert (await manager.get("/api/v1/interviews", params={"flow": "new"})).json()["items"] == []
+    assert len((await manager.get("/api/v1/interviews", params={"flow": "done"})).json()["items"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_interview_with_attachments(api, workspace, fresh_client):
+    """INT-16: Create New attaches a resume and a JD as-is, with no pipeline run."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+
+    resume = await manager.post(
+        "/api/v1/interviews/attachments",
+        data={"kind": "resume"},
+        files={"file": ("candidate.pdf", b"%PDF-1.4 resume", "application/pdf")},
+    )
+    assert resume.status_code == 201, resume.text
+    jd = await manager.post(
+        "/api/v1/interviews/attachments",
+        data={"kind": "jd"},
+        files={"file": ("role.txt", b"Hiring a designer.", "text/plain")},
+    )
+    assert jd.status_code == 201, jd.text
+
+    bad = await manager.post(
+        "/api/v1/interviews/attachments",
+        data={"kind": "resume"},
+        files={"file": ("resume.exe", b"nope", "application/octet-stream")},
+    )
+    assert bad.status_code == 422
+
+    created = await manager.post(
+        "/api/v1/interviews",
+        json={
+            "company_name": "Manual Co",
+            "job_title": "Product Designer",
+            "reviewer_id": str(workspace["reviewer"].id),
+            "meeting_at": "2030-06-01T14:00:00+00:00",
+            "tech_stack": "Figma",
+            "attachment_ids": [resume.json()["id"], jd.json()["id"]],
+        },
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["doc_set"] is None
+    assert body["company_name"] == "Manual Co"
+    assert body["job_title"] == "Product Designer"
+    assert {item["kind"] for item in body["attachments"]} == {"resume", "jd"}
+
+    download = await manager.get(f"/api/v1/interviews/{body['id']}/attachments/{resume.json()['id']}")
+    assert download.status_code == 200
+    assert download.content == b"%PDF-1.4 resume"
+
+    reviewer = await fresh_client("reviewer@example.com", workspace["password"])
+    listed = (await reviewer.get("/api/v1/interviews", params={"tab": "all"})).json()["items"]
+    assert body["id"] in [item["id"] for item in listed]
+    assert (await reviewer.get(f"/api/v1/interviews/{body['id']}/attachments/{resume.json()['id']}")).status_code == 200
+
+    missing = await manager.post(
+        "/api/v1/interviews",
+        json={"company_name": "No files", "job_title": "Nope", "attachment_ids": []},
+    )
+    assert missing.status_code == 422
