@@ -34,6 +34,7 @@ const NAV: Record<Role, NavItem[]> = {
   maker: [
     { to: "/jd-upload", label: t("nav.jdUpload"), icon: FormInput },
     { to: "/resumes", label: t("nav.resumes"), icon: FileText },
+    { to: "/my-profile", label: t("nav.myProfile"), icon: UserCog },
   ],
   manager: [
     { to: "/resumes", label: t("nav.resumes"), icon: FileText },

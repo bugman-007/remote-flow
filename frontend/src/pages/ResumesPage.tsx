@@ -37,7 +37,7 @@ const DEFAULTS = {
   page: 1,
 };
 
-const STATUS_CHIPS = ["all", "ready", "processing", "retrying", "attention", "skipped", "expired", "selected"] as const;
+const STATUS_CHIPS = ["all", "ready", "new", "processing", "retrying", "attention", "skipped", "expired", "selected"] as const;
 
 export function ResumesPage() {
   const { user } = useAuth();

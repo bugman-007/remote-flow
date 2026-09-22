@@ -30,7 +30,15 @@ from app.models import (
     User,
     WorkerHeartbeat,
 )
-from app.schemas import ProviderRequest, ProviderUpdate, SettingsUpdate, ThemeAssignRequest, ThemeRequest, ThemeUpdate
+from app.schemas import (
+    ProviderRequest,
+    ProviderUpdate,
+    SettingsUpdate,
+    ThemeAssignRequest,
+    ThemePreviewRequest,
+    ThemeRequest,
+    ThemeUpdate,
+)
 from app.serializers import provider_out, theme_out
 from app.services import events, metrics, pipeline, render, retention, settings_store, storage
 from app.services.crypto import decrypt_secret, encrypt_secret
@@ -266,6 +274,19 @@ async def list_themes(_: User = Depends(manager_required), session: AsyncSession
     return {"items": items}
 
 
+@router.post("/themes/preview")
+async def preview_theme_params(
+    payload: ThemePreviewRequest,
+    _: User = Depends(manager_required),
+):
+    """SET-10: live preview of unsaved params, rendered by the real pipeline."""
+    try:
+        params = validate_theme_params({**dict(core.DEFAULTS), **(payload.params or {})})
+    except ThemeValidationError as exc:
+        raise APIError("invalid_theme", str(exc), status_code=422) from exc
+    return _render_theme_preview(params, theme_id=None)
+
+
 @router.post("/themes", status_code=201)
 async def create_theme(
     payload: ThemeRequest,
@@ -339,6 +360,11 @@ async def preview_theme(
     theme = await session.get(Theme, theme_id)
     if theme is None:
         raise APIError("not_found", "Theme not found.", status_code=404)
+    return _render_theme_preview(theme.params, theme_id=theme.id)
+
+
+def _render_theme_preview(params: dict, *, theme_id: str | None) -> Response:
+    """SET-10: render the bundled sample.json with the given params (saved or not)."""
     sample_path = Path(__file__).resolve().parents[2] / "vendor" / "resume_builder" / "sample.json"
     data = json.loads(sample_path.read_text(encoding="utf-8"))
     data["job_description"] = "Sample job description used for theme previews."
@@ -346,10 +372,10 @@ async def preview_theme(
     try:
         output = render.render_generation(
             llm_json=data,
-            theme_snapshot=theme.params,
+            theme_snapshot=params,
             doc_set_path=doc_set_dir,
             generation_no=0,
-            meta={"preview": True, "theme_id": theme.id},
+            meta={"preview": True, "theme_id": theme_id},
         )
     except render.RenderError as exc:
         raise APIError("render_unavailable", exc.message, status_code=503) from exc

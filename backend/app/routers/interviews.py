@@ -247,28 +247,50 @@ async def list_interviews(
         query = query.where(Interview.doc_set_id.in_(sub))
     interviews = (await session.execute(query)).scalars().all()
     now = utcnow()
-    if tab == "upcoming":
+    if tab == "todo":
+        # INT-4: everything still waiting on the reviewer (not completed/cancelled).
+        interviews = [i for i in interviews if i.status == "scheduled"]
+        interviews.sort(key=lambda item: item.meeting_at or now)
+    elif tab == "done":
+        interviews = [i for i in interviews if i.status == "completed"]
+        interviews.sort(key=lambda item: item.meeting_at or now, reverse=True)
+    elif tab == "upcoming":
         interviews = [i for i in interviews if i.meeting_at and i.meeting_at >= now]
         interviews.sort(key=lambda item: item.meeting_at)
     elif tab == "past":
         interviews = [i for i in interviews if not i.meeting_at or i.meeting_at < now]
+        interviews.sort(key=lambda item: item.meeting_at or now, reverse=True)
+    elif tab == "done_all":
         interviews.sort(key=lambda item: item.meeting_at or now, reverse=True)
     else:
         interviews.sort(key=lambda item: item.meeting_at or now)
     total = len(interviews)
     page_items = interviews[(page - 1) * page_size : (page - 1) * page_size + page_size]
     payload = [await _interview_out(session, interview, user=user) for interview in page_items]
+    counts: dict[str, int] | None = None
     if user.role == "reviewer":
+        # Counts stay independent of the active tab so the badge never flickers off.
+        own = (
+            await session.execute(
+                select(Interview.status, Interview.seen_by_reviewer_at, Interview.meeting_at).where(
+                    Interview.reviewer_id == user.id
+                )
+            )
+        ).all()
         unseen = sum(
-            1
-            for interview in interviews
-            if interview.seen_by_reviewer_at is None and interview.meeting_at and interview.meeting_at >= now
+            1 for status, seen, meeting_at in own if seen is None and meeting_at and meeting_at >= now and status == "scheduled"
         )
+        counts = {
+            "total": len(own),
+            "todo": sum(1 for status, _seen, _at in own if status == "scheduled"),
+            "done": sum(1 for status, _seen, _at in own if status == "completed"),
+        }
     else:
         unseen = 0
     return {
         "items": payload,
         "unseen": unseen,
+        "counts": counts,
         "pagination": {"page": page, "page_size": page_size, "total": total,
                        "pages": (total + page_size - 1) // page_size},
     }

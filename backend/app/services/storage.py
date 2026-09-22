@@ -126,9 +126,18 @@ def download_filename(basename: str, kind: str) -> str:
     return f"{basename}{suffix}"
 
 
-def zip_name_for_date(maker_name: str, day: date, suffix: str = "all") -> str:
+def zip_name_for_date(maker_name: str, day: date | None, suffix: str = "all") -> str:
     safe_maker = slugify(maker_name, fallback="maker")
-    return f"{safe_maker}_{day.isoformat()}_{suffix}.zip"
+    stamp = day.isoformat() if day else "range"
+    return f"{safe_maker}_{stamp}_{suffix}.zip"
+
+
+def zip_name_for_range(maker_name: str, date_from: date | None, date_to: date | None) -> str:
+    """RES-1: name a range download ``maker_YYYY-MM-DD_YYYY-MM-DD.zip``."""
+    safe_maker = slugify(maker_name, fallback="maker")
+    start = date_from.isoformat() if date_from else "start"
+    end = date_to.isoformat() if date_to else "end"
+    return f"{safe_maker}_{start}_{end}.zip"
 
 
 def disk_usage_pct() -> float:

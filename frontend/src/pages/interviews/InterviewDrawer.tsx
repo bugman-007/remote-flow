@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CalendarPlus, Copy, Eye, Repeat } from "lucide-react";
 import { api, downloadBlob, errorMessage } from "../../lib/api";
@@ -10,6 +10,42 @@ import { formatDateTime } from "../../lib/format";
 import { t } from "../../i18n";
 import type { Feedback, Interview, User } from "../../types";
 import type { Paginated } from "../../types";
+
+/** INT-9: reviewers read the meeting time in a time zone they pick (EST by default). */
+const DEFAULT_TZ = "America/New_York";
+const TZ_FALLBACK = [
+  "America/New_York",
+  "America/Chicago",
+  "America/Denver",
+  "America/Los_Angeles",
+  "UTC",
+  "Europe/London",
+  "Europe/Berlin",
+  "Asia/Kolkata",
+  "Asia/Tokyo",
+  "Australia/Sydney",
+];
+
+function timeZones(): string[] {
+  const supported = (Intl as unknown as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf;
+  if (typeof supported === "function") {
+    try {
+      return supported("timeZone");
+    } catch {
+      return TZ_FALLBACK;
+    }
+  }
+  return TZ_FALLBACK;
+}
+
+function formatInZone(iso: string | null | undefined, timeZone: string): string {
+  if (!iso) return "—";
+  try {
+    return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short", timeZone }).format(new Date(iso));
+  } catch {
+    return formatDateTime(iso);
+  }
+}
 
 export function InterviewDrawer({
   interviewId,
@@ -39,6 +75,13 @@ export function InterviewDrawer({
   const data = interview.data;
   const [feedback, setFeedback] = useState<Partial<Feedback>>({});
   const [values, setValues] = useState<Record<string, unknown>>({});
+  const [timeZone, setTimeZone] = useState(DEFAULT_TZ);
+  const [tzTouched, setTzTouched] = useState(false);
+  const zones = useMemo(() => timeZones(), []);
+
+  useEffect(() => {
+    if (!tzTouched && data?.meeting_tz) setTimeZone(data.meeting_tz);
+  }, [data?.meeting_tz, tzTouched]);
 
   useEffect(() => {
     if (data?.feedback) setFeedback(data.feedback);
@@ -143,7 +186,10 @@ export function InterviewDrawer({
           ) : null}
 
           <Card>
-            <CardHeader title={t("interviews.detail")} description={formatDateTime(data.meeting_at)} />
+            <CardHeader
+              title={t("interviews.detail")}
+              description={`${data.doc_set?.company_name ?? "—"} · ${data.doc_set?.job_title ?? "—"}`}
+            />
             <dl className="grid gap-2 text-sm tablet:grid-cols-2">
               <div>
                 <dt className="rf-label">{t("interviews.reviewer")}</dt>
@@ -152,17 +198,34 @@ export function InterviewDrawer({
               <div>
                 <dt className="rf-label">{t("interviews.meetingAt")}</dt>
                 <dd>
-                  {data.meeting_at ? new Date(data.meeting_at).toLocaleString() : "—"}
-                  <span className="ml-1 text-xs text-muted-foreground" title={t("interviews.meetingTz", { tz: data.meeting_tz ?? "UTC" })}>
-                    ({data.meeting_tz ?? "UTC"})
-                  </span>
+                  {formatInZone(data.meeting_at, timeZone)}
+                  {values.meeting_end_time ? ` – ${String(values.meeting_end_time)}` : ""}
+                </dd>
+              </div>
+              <div className="tablet:col-span-2">
+                <dt className="rf-label">{t("interviews.meetingTzLabel")}</dt>
+                <dd>
+                  <Select
+                    className="h-8 w-64 text-xs"
+                    value={timeZone}
+                    onChange={(event) => {
+                      setTzTouched(true);
+                      setTimeZone(event.target.value);
+                    }}
+                  >
+                    {zones.map((zone) => (
+                      <option key={zone} value={zone}>
+                        {zone}
+                      </option>
+                    ))}
+                  </Select>
                 </dd>
               </div>
             </dl>
           </Card>
 
           <Card>
-            <CardHeader title={t("resumes.columns.files")} />
+            <CardHeader title={t("interviews.resumeAndJd")} description={t("interviews.resumeAndJdHint")} />
             <FileChips files={data.files} />
             {data.files.length ? (
               <Button
@@ -190,7 +253,7 @@ export function InterviewDrawer({
               <CardHeader title={t("profiles.title")} />
               <dl className="grid gap-2 text-sm tablet:grid-cols-2">
                 {Object.entries(data.profile)
-                  .filter(([, value]) => value !== null && value !== undefined)
+                  .filter(([key, value]) => key !== "id" && value !== null && value !== undefined && value !== "")
                   .map(([key, value]) => (
                     <div key={key}>
                       <dt className="rf-label">{key.replace(/_/g, " ")}</dt>
@@ -205,7 +268,9 @@ export function InterviewDrawer({
             <Card>
               <CardHeader title={t("interviews.sharedProfile")} />
               <dl className="grid gap-2 text-sm tablet:grid-cols-2">
-                {Object.entries(data.profile).map(([key, value]) => (
+                {Object.entries(data.profile)
+                  .filter(([key, value]) => key !== "id" && value !== null && value !== undefined && value !== "")
+                  .map(([key, value]) => (
                   <div key={key}>
                     <dt className="rf-label">{key.replace(/_/g, " ")}</dt>
                     <dd className="break-words">{String(value)}</dd>
@@ -216,8 +281,43 @@ export function InterviewDrawer({
           ) : null}
 
           <Card>
-            <CardHeader title={t("interviews.detail")} />
+            <CardHeader title={t("interviews.sharedInfo")} />
             <div className="grid gap-3 tablet:grid-cols-2">
+              {isManager ? (
+                <>
+                  <div>
+                    <p className="rf-label">{t("interviews.companyContact")}</p>
+                    <Input
+                      placeholder={t("interviews.companyContactHint")}
+                      value={String(values.company_contact ?? "")}
+                      onChange={(event) => setValues({ ...values, company_contact: event.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <p className="rf-label">{t("interviews.recruiter")}</p>
+                    <Input
+                      placeholder={t("interviews.recruiterHint")}
+                      value={String(values.recruiter ?? "")}
+                      onChange={(event) => setValues({ ...values, recruiter: event.target.value })}
+                    />
+                  </div>
+                </>
+              ) : (
+                <>
+                  {values.company_contact ? (
+                    <div>
+                      <p className="rf-label">{t("interviews.companyContact")}</p>
+                      <p className="text-sm">{String(values.company_contact)}</p>
+                    </div>
+                  ) : null}
+                  {values.recruiter ? (
+                    <div>
+                      <p className="rf-label">{t("interviews.recruiter")}</p>
+                      <p className="text-sm">{String(values.recruiter)}</p>
+                    </div>
+                  ) : null}
+                </>
+              )}
               {fields
                 .filter((field) => isManager || field.visible_to_reviewer)
                 .map((field) => (
@@ -368,9 +468,12 @@ export function InterviewDrawer({
             </Card>
           ) : null}
 
-          {canGiveFeedback ? (
+          {!isManager ? (
             <Card>
-              <CardHeader title={data.feedback ? t("interviews.feedbackEdit") : t("interviews.feedback")} description={t("interviews.meetingTz", { tz: data.meeting_tz ?? "UTC" })} />
+              <CardHeader
+                title={data.feedback ? t("interviews.feedbackEdit") : t("interviews.commentBox")}
+                description={canGiveFeedback ? t("interviews.commentBoxHint") : t("interviews.feedbackOpensAfter")}
+              />
               <div className="grid gap-3 tablet:grid-cols-2">
                 <Field label={t("interviews.feedbackOutcome")}>
                   <Select
@@ -404,10 +507,10 @@ export function InterviewDrawer({
                   <Textarea value={feedback.concerns ?? ""} onChange={(event) => setFeedback({ ...feedback, concerns: event.target.value })} />
                 </Field>
               </div>
-              <Field label={t("interviews.feedbackNotes")}>
+              <Field label={isManager ? t("interviews.feedbackNotes") : t("interviews.commentBox")}>
                 <Textarea value={feedback.notes ?? ""} onChange={(event) => setFeedback({ ...feedback, notes: event.target.value })} />
               </Field>
-              <Button size="sm" onClick={() => void submitFeedback()}>
+              <Button size="sm" onClick={() => void submitFeedback()} disabled={!canGiveFeedback}>
                 {t("interviews.feedbackSubmit")}
               </Button>
             </Card>

@@ -307,6 +307,8 @@ class DocSet(PkMixin, Base):
     keep: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     renamed_by: Mapped[str | None] = mapped_column(GUID, ForeignKey("users.id"))
     files_expired_at: Mapped[datetime | None] = mapped_column(DateTimeTZ)
+    #: RES-14: when the owning Maker last downloaded this set; ``None`` means "New".
+    downloaded_at: Mapped[datetime | None] = mapped_column(DateTimeTZ, index=True)
     search_tsv: Mapped[str | None] = mapped_column(Text)
 
     job: Mapped[Job] = relationship(back_populates="doc_set")

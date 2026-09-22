@@ -177,6 +177,8 @@ function ThemeDialog({
   const [assigned, setAssigned] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
 
   const profiles = useQuery({
     queryKey: ["profiles"],
@@ -192,6 +194,32 @@ function ThemeDialog({
     setAssigned((theme?.profiles ?? []).map((profile) => profile.id));
     setError(null);
   }, [open, theme, defaults]);
+
+  // SET-10: render the unsaved params so the Manager sees the result while editing.
+  const livePreview = async () => {
+    setError(null);
+    setPreviewBusy(true);
+    try {
+      const blob = await api.requestBlob("/themes/preview", { method: "POST", body: { params } });
+      const url = URL.createObjectURL(blob);
+      setPreviewUrl((current) => {
+        if (current) URL.revokeObjectURL(current);
+        return url;
+      });
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setPreviewBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (open) return;
+    setPreviewUrl((current) => {
+      if (current) URL.revokeObjectURL(current);
+      return null;
+    });
+  }, [open]);
 
   const save = async () => {
     setBusy(true);
@@ -291,6 +319,21 @@ function ThemeDialog({
           </div>
         </Field>
       </div>
+      <div className="mt-3">
+        <Button size="sm" variant="outline" onClick={() => void livePreview()} loading={previewBusy}>
+          <Eye className="h-3.5 w-3.5" />
+          {t("settings.themes.livePreview")}
+        </Button>
+      </div>
+      {previewUrl ? (
+        <div className="mt-3">
+          <iframe
+            title={t("settings.themes.livePreview")}
+            src={previewUrl}
+            className="h-[45vh] w-full rounded border border-border"
+          />
+        </div>
+      ) : null}
       {error ? (
         <div className="mt-3">
           <ErrorNote>{error}</ErrorNote>

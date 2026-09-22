@@ -1,14 +1,14 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, Plus, Save, UserPlus } from "lucide-react";
-import { api, errorMessage } from "../lib/api";
+import { Archive, FileDown, Plus, Save, UserPlus } from "lucide-react";
+import { api, downloadBlob, errorMessage } from "../lib/api";
 import { t } from "../i18n";
 import { Badge, Button, Card, CardHeader, Checkbox, EmptyState, ErrorNote, Field, Input, Select, Spinner, Textarea } from "../ui/primitives";
 import { Dialog, Drawer } from "../ui/dialog";
 import { Table } from "../ui/table";
 import { useToast } from "../ui/toast";
 import { formatDate, formatDateTime } from "../lib/format";
-import { parseList } from "../lib/utils";
+import { downloadText, parseList } from "../lib/utils";
 import type { Paginated, Profile, PromptVersion, Theme, User } from "../types";
 
 const SHAREABLE = ["Name", "URL", "Information", "Tags"];
@@ -448,6 +448,29 @@ function PromptTab({
     }
   };
 
+  // PRO-9: the test result can be inspected as JSON or downloaded as a rendered PDF/DOCX pair.
+  const downloadTestJson = () => {
+    if (!testResult) return;
+    downloadText(`prompt-test-${(profileId ?? "profile").slice(0, 8)}.json`, JSON.stringify(testResult.json, null, 2));
+  };
+
+  const downloadTestPdf = async () => {
+    if (!profileId || testing) return;
+    setTesting(true);
+    setTestError(null);
+    try {
+      const blob = await api.requestBlob(`/profiles/${profileId}/test/pdf`, {
+        method: "POST",
+        body: { jd_text: testJd },
+      });
+      await downloadBlob(blob, `prompt-test-${profileId.slice(0, 8)}.pdf`);
+    } catch (error) {
+      setTestError(errorMessage(error));
+    } finally {
+      setTesting(false);
+    }
+  };
+
   return (
     <div className="space-y-3">
       <Field label={t("profiles.prompt")} hint={t("profiles.promptPlaceholders")}>
@@ -533,9 +556,27 @@ function PromptTab({
         <Field label={t("profiles.testJd")}>
           <Textarea value={testJd} onChange={(event) => setTestJd(event.target.value)} />
         </Field>
-        <Button size="sm" onClick={() => void runTest()} loading={testing} disabled={!profileId || testJd.trim().length < 50}>
-          {t("profiles.runTest")}
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" onClick={() => void runTest()} loading={testing} disabled={!profileId || testJd.trim().length < 50}>
+            {t("profiles.runTest")}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void downloadTestPdf()}
+            loading={testing}
+            disabled={!profileId || testJd.trim().length < 50}
+          >
+            <FileDown className="h-3.5 w-3.5" />
+            {t("profiles.runTestPdf")}
+          </Button>
+          {testResult ? (
+            <Button size="sm" variant="outline" onClick={downloadTestJson}>
+              <FileDown className="h-3.5 w-3.5" />
+              {t("profiles.downloadJson")}
+            </Button>
+          ) : null}
+        </div>
         {testError ? (
           <div className="mt-2">
             <ErrorNote>{testError}</ErrorNote>

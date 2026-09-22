@@ -94,6 +94,7 @@ Integrity notes:
 | `keep` | `BOOLEAN` | no |  |
 | `renamed_by` | `VARCHAR(36)` | yes | FK -> users.id |
 | `files_expired_at` | `DATETIME` | yes |  |
+| `downloaded_at` | `DATETIME` | yes | index |
 | `search_tsv` | `TEXT` | yes |  |
 | `id` | `VARCHAR(36)` | no | PK |
 | `created_at` | `DATETIME` | no |  |
@@ -102,6 +103,8 @@ Integrity notes:
 - unique: `job_id`
 
 - index `ix_doc_sets_company_name`: `company_name`
+
+- index `ix_doc_sets_downloaded_at`: `downloaded_at`
 
 - index `ix_doc_sets_is_selected`: `is_selected`
 

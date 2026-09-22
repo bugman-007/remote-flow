@@ -152,6 +152,11 @@ export function ResumesTable({
                     {isManager ? <td className="max-w-[10rem] truncate">{row.maker_name ?? "—"}</td> : null}
                     <td>
                       <StatusChip status={row.status} role={role} />
+                      {!isManager && !row.downloaded_at ? (
+                        <Badge tone="success" className="ml-1" title={t("resumes.newHint")}>
+                          {t("resumes.filterStatus.new")}
+                        </Badge>
+                      ) : null}
                       {row.is_selected || row.keep ? (
                         <span className="ml-1 inline-flex gap-1">
                           {row.is_selected ? (

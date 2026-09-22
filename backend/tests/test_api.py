@@ -763,3 +763,182 @@ async def test_doc_sets_sort_by_submitted_time(api, workspace):
     oldest = (await maker.get("/api/v1/doc-sets", params={**params, "order": "asc"})).json()
     assert seqs(newest) == [2, 1]
     assert seqs(oldest) == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_maker_new_filter_clears_after_download(api, workspace):
+    """RES-14: "New" lists never-downloaded sets and clears once the Maker takes them."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    await submit_via_api(maker, "New filter: hiring a platform engineer at Company Filter One.", key="new-1")
+    await run_pipeline()
+
+    day = {"date": date.today().isoformat()}
+    fresh = (await maker.get("/api/v1/doc-sets", params={**day, "status": "new"})).json()
+    assert len(fresh["items"]) == 1
+    row = fresh["items"][0]
+    assert row["downloaded_at"] is None
+
+    response = await maker.get(f"/api/v1/doc-sets/{row['doc_set_id']}/zip")
+    assert response.status_code == 200, response.text
+
+    after = (await maker.get("/api/v1/doc-sets", params={**day, "status": "new"})).json()
+    assert after["items"] == []
+    all_rows = (await maker.get("/api/v1/doc-sets", params=day)).json()["items"]
+    assert all_rows[0]["downloaded_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_date_zip_accepts_a_range(api, workspace):
+    """RES-1: "This week"/"This month" downloads span a date range, not a single day."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    await submit_via_api(maker, "Range zip: hiring a designer at Company Range One.", key="range-1")
+    await run_pipeline()
+
+    today = date.today().isoformat()
+    response = await maker.get("/api/v1/doc-sets/zip", params={"date_from": today, "date_to": today})
+    assert response.status_code == 200, response.text
+    assert response.headers["X-Zip-Included"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_reviewer_tabs_and_overview_counts(api, workspace, fresh_client):
+    """INT-4: reviewers get All/Upcoming/Done tabs plus an overview count block."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    await submit_via_api(maker, "Interview tabs: hiring a QA engineer at Company Tabs One.", key="tabs-1")
+    await run_pipeline()
+    row = (await maker.get("/api/v1/doc-sets", params={"date": date.today().isoformat()})).json()["items"][0]
+
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    created = await manager.post(
+        "/api/v1/interviews",
+        json={
+            "doc_set_id": row["doc_set_id"],
+            "reviewer_id": str(workspace["reviewer"].id),
+            "meeting_at": utcnow().isoformat(),
+            "values": {"meeting_end_time": "11:30"},
+        },
+    )
+    assert created.status_code == 201, created.text
+    interview_id = created.json()["id"]
+
+    reviewer = await fresh_client("reviewer@example.com", workspace["password"])
+    todo = (await reviewer.get("/api/v1/interviews", params={"tab": "todo"})).json()
+    assert [item["id"] for item in todo["items"]] == [interview_id]
+    assert todo["counts"] == {"total": 1, "todo": 1, "done": 0}
+    assert todo["items"][0]["values"]["meeting_end_time"] == "11:30"
+
+    assert (await reviewer.get("/api/v1/interviews", params={"tab": "done"})).json()["items"] == []
+
+    feedback = await reviewer.post(
+        f"/api/v1/interviews/{interview_id}/feedback",
+        json={"outcome": "pass", "rating": 4, "notes": "Solid candidate."},
+    )
+    assert feedback.status_code == 200, feedback.text
+
+    done = (await reviewer.get("/api/v1/interviews", params={"tab": "done"})).json()
+    assert [item["id"] for item in done["items"]] == [interview_id]
+    assert done["counts"] == {"total": 1, "todo": 0, "done": 1}
+    assert (await reviewer.get("/api/v1/interviews", params={"tab": "all"})).json()["counts"]["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_interview_date_range_filter(api, workspace, fresh_client):
+    """INT-4: the table's date filter spans a from/to window."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    await submit_via_api(maker, "Interview date filter: hiring a PM at Company Dates One.", key="dates-1")
+    await run_pipeline()
+    row = (await maker.get("/api/v1/doc-sets", params={"date": date.today().isoformat()})).json()["items"][0]
+
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    created = await manager.post(
+        "/api/v1/interviews",
+        json={
+            "doc_set_id": row["doc_set_id"],
+            "reviewer_id": str(workspace["reviewer"].id),
+            "meeting_at": "2030-01-15T10:00:00+00:00",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    reviewer = await fresh_client("reviewer@example.com", workspace["password"])
+    inside = await reviewer.get(
+        "/api/v1/interviews",
+        params={"tab": "all", "date_from": "2030-01-01T00:00:00", "date_to": "2030-01-31T23:59:59"},
+    )
+    outside = await reviewer.get(
+        "/api/v1/interviews",
+        params={"tab": "all", "date_from": "2031-01-01T00:00:00", "date_to": "2031-01-31T23:59:59"},
+    )
+    assert [item["id"] for item in inside.json()["items"]] == [created.json()["id"]]
+    assert outside.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_maker_sees_their_shared_profile(api, workspace):
+    """PRO-2: a Maker can read the shared fields of the assigned Profile and nothing else."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    body = (await maker.get("/api/v1/me/profile")).json()
+    assert body["profile"] is not None
+    assert body["profile"]["name"] == workspace["profile"].name
+    # Secrets/LLM configuration are never part of the shared payload.
+    assert "model" not in body["profile"]
+    assert "active_prompt" not in body["profile"]
+    assert "id" in body["profile"]
+
+    reviewer = await api.login("reviewer@example.com", workspace["password"])
+    assert (await reviewer.get("/api/v1/me/profile")).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_shared_profile_uses_the_information_field(api, workspace, fresh_client, db_session):
+    """PRO-2: sharing "Information" exposes the description (the renamed Description tab)."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    profile = workspace["profile"]
+    response = await manager.patch(
+        f"/api/v1/profiles/{profile.id}",
+        json={"description": "Senior backend engineer, remote.", "shared_fields": ["Name", "Information"]},
+    )
+    assert response.status_code == 200, response.text
+
+    maker = await api.login("maker@example.com", workspace["password"])
+    shared = (await maker.get("/api/v1/me/profile")).json()["profile"]
+    assert shared["description"] == "Senior backend engineer, remote."
+
+
+@pytest.mark.asyncio
+async def test_prompt_test_can_render_a_pdf(api, workspace, fresh_client):
+    """LLM-5: the Prompt tab's test run can come back as JSON or as a rendered PDF."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    profile_id = workspace["profile"].id
+
+    as_json = await manager.post(
+        f"/api/v1/profiles/{profile_id}/test",
+        json={"jd_text": "We are hiring a backend engineer to build APIs."},
+    )
+    assert as_json.status_code == 200, as_json.text
+    assert "json" in as_json.json()
+
+    as_pdf = await manager.post(
+        f"/api/v1/profiles/{profile_id}/test/pdf",
+        json={"jd_text": "We are hiring a backend engineer to build APIs."},
+    )
+    assert as_pdf.status_code == 200, as_pdf.text
+    assert as_pdf.headers["content-type"] == "application/pdf"
+    assert as_pdf.content.startswith(b"%PDF")
+    assert "attachment" in as_pdf.headers["content-disposition"]
+
+
+@pytest.mark.asyncio
+async def test_theme_preview_renders_unsaved_params(api, workspace, fresh_client):
+    """SET-10: the theme dialog previews edits before they are saved."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    response = await manager.post(
+        "/api/v1/themes/preview",
+        json={"params": {"font": "Inter", "size": 11, "accent": "#ff0000"}},
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.content.startswith(b"%PDF")
+
+    bad = await manager.post("/api/v1/themes/preview", json={"params": {"size": "huge"}})
+    assert bad.status_code == 422, bad.text

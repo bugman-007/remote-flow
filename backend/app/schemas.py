@@ -119,6 +119,12 @@ class ThemeRequest(Model):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class ThemePreviewRequest(Model):
+    """SET-10: preview unsaved theme params inside the theme dialog."""
+
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
 class ThemeUpdate(Model):
     name: str | None = None
     description: str | None = None

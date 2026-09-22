@@ -87,6 +87,7 @@ export interface DocSetRow {
   is_selected: boolean;
   keep: boolean;
   expired: boolean;
+  downloaded_at?: string | null;
   attempts?: number;
   tokens?: number;
   interview_count?: number;

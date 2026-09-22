@@ -8,7 +8,8 @@ import { Badge, Button, Card, CardHeader, EmptyState, Input, Select, Spinner } f
 import { Pager, Table, TableState } from "../ui/table";
 import { Tabs } from "../ui/tabs";
 import { useUrlState } from "../lib/useUrlState";
-import { formatDateTime, formatSeq } from "../lib/format";
+import { formatDateTime, formatSeq, todayISO } from "../lib/format";
+import { DateSelector } from "../components/DateSelector";
 import { InterviewDrawer } from "./interviews/InterviewDrawer";
 import { ScheduleDialog } from "./interviews/ScheduleDialog";
 import { TemplatesDialog } from "./interviews/TemplatesDialog";
@@ -24,7 +25,20 @@ interface SelectedRow {
   seq_no: number | null;
 }
 
-const DEFAULTS = { tab: "interviews", q: "", status: "", page: 1 };
+const DEFAULTS = {
+  tab: "interviews",
+  q: "",
+  status: "",
+  date_from: "",
+  date_to: "",
+  page: 1,
+};
+
+interface InterviewCounts {
+  total: number;
+  todo: number;
+  done: number;
+}
 
 export function InterviewsPage() {
   const { user } = useAuth();
@@ -34,15 +48,25 @@ export function InterviewsPage() {
   const [scheduleFor, setScheduleFor] = useState<string | null>(null);
   const [templatesOpen, setTemplatesOpen] = useState(false);
 
-  const tab = isManager ? state.tab || "interviews" : state.tab === "past" ? "past" : "upcoming";
+  const reviewerTabs = ["all", "todo", "done"] as const;
+  const tab = isManager
+    ? state.tab === "selected"
+      ? "selected"
+      : "interviews"
+    : reviewerTabs.includes(state.tab as (typeof reviewerTabs)[number])
+      ? state.tab
+      : "todo";
+  const rangeActive = Boolean(state.date_from && state.date_to);
 
   const interviews = useQuery({
     queryKey: ["interviews", { tab, q: state.q, status: state.status, page: state.page }],
     queryFn: () =>
-      api.get<Paginated<Interview> & { unseen: number }>("/interviews", {
+      api.get<Paginated<Interview> & { unseen: number; counts?: InterviewCounts | null }>("/interviews", {
         tab,
         q: state.q || undefined,
         status: state.status || undefined,
+        date_from: rangeActive ? `${state.date_from}T00:00:00` : undefined,
+        date_to: rangeActive ? `${state.date_to}T23:59:59` : undefined,
         page: state.page,
         page_size: 50,
       }),
@@ -59,6 +83,7 @@ export function InterviewsPage() {
   }, [interviews.data, isManager]);
 
   const rows = interviews.data?.items ?? [];
+  const counts = interviews.data?.counts ?? null;
 
   return (
     <div className="space-y-4">
@@ -70,6 +95,13 @@ export function InterviewsPage() {
           ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <DateSelector
+            date={state.date_from || todayISO()}
+            onDate={(value) => update({ date_from: value, date_to: value, page: 1 })}
+            range={{ from: state.date_from, to: state.date_to }}
+            onRange={(value) => update({ date_from: value.from, date_to: value.to, page: 1 })}
+            withRange
+          />
           <Input
             className="h-8 w-56 text-sm"
             placeholder={t("interviews.searchPlaceholder")}
@@ -100,27 +132,36 @@ export function InterviewsPage() {
       </div>
 
       {!isManager ? (
-        <div className="grid gap-3 tablet:grid-cols-3">
+        <div className="grid gap-3 tablet:grid-cols-2">
           <Card>
             <CardHeader title={t("interviews.nextUp")} />
             {nextUp ? (
               <div className="text-sm">
                 <p className="font-medium">{nextUp.doc_set?.company_name ?? "—"}</p>
-                <p className="text-muted-foreground">{formatDateTime(nextUp.meeting_at)}</p>
+                <p className="text-muted-foreground">
+                  {nextUp.doc_set?.job_title ?? "—"} · {formatDateTime(nextUp.meeting_at)}
+                </p>
               </div>
             ) : (
               <p className="text-sm text-muted-foreground">{t("interviews.upcomingEmpty")}</p>
             )}
           </Card>
           <Card>
-            <CardHeader title={t("interviews.thisWeek")} />
-            <p className="text-2xl font-semibold">{rows.filter((row) => row.status === "scheduled").length}</p>
-          </Card>
-          <Card>
-            <CardHeader title={t("interviews.pendingFeedback")} />
-            <p className="text-2xl font-semibold">
-              {rows.filter((row) => !row.feedback && row.meeting_at && new Date(row.meeting_at).getTime() <= Date.now()).length}
-            </p>
+            <CardHeader title={t("interviews.overview")} />
+            <dl className="grid grid-cols-3 gap-2 text-sm">
+              <div>
+                <dt className="rf-label">{t("interviews.overviewTotal")}</dt>
+                <dd className="text-2xl font-semibold">{counts?.total ?? rows.length}</dd>
+              </div>
+              <div>
+                <dt className="rf-label">{t("interviews.overviewTodo")}</dt>
+                <dd className="text-2xl font-semibold">{counts?.todo ?? "—"}</dd>
+              </div>
+              <div>
+                <dt className="rf-label">{t("interviews.overviewDone")}</dt>
+                <dd className="text-2xl font-semibold">{counts?.done ?? "—"}</dd>
+              </div>
+            </dl>
           </Card>
         </div>
       ) : null}
@@ -137,8 +178,9 @@ export function InterviewsPage() {
       ) : (
         <Tabs
           items={[
-            { id: "upcoming", label: t("interviews.tabUpcoming"), badge: interviews.data?.unseen },
-            { id: "past", label: t("interviews.tabPast") },
+            { id: "all", label: t("interviews.tabAll") },
+            { id: "todo", label: t("interviews.tabTodo"), badge: interviews.data?.unseen },
+            { id: "done", label: t("interviews.tabDone") },
           ]}
           value={tab}
           onChange={(id) => update({ tab: id, page: 1 })}
