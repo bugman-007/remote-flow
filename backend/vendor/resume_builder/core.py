@@ -232,6 +232,16 @@ def _block(kind: str, text: str = "", **kwargs: Any) -> Block:
     return Block(kind=kind, runs=parse_highlights(text), **kwargs)
 
 
+#: Values the model emits for "unknown" that must not be printed.
+CONTACT_PLACEHOLDERS = frozenset({"none", "null", "n/a", "na", "not specified", "unspecified", "unknown", "-", "--"})
+
+
+def _contact_value(value: Any) -> str:
+    """Header value, or ``""`` when the model left it out or answered with a placeholder."""
+    text = str(value or "").strip()
+    return "" if text.lower() in CONTACT_PLACEHOLDERS else text
+
+
 def build_blocks(data: dict) -> list[Block]:
     """Turn resume JSON into the ordered block list that ``build_docx`` renders."""
     cleaned = _clean_data(data)
@@ -247,9 +257,10 @@ def build_blocks(data: dict) -> list[Block]:
     elif subtitle:
         blocks.append(_block("title", subtitle))
 
-    # Missing optional fields must not print as the literal string "None".
+    # A field the model left out (or filled with a placeholder) must never reach
+    # the header - it used to print as the literal string "None".
     contact = [
-        str(cleaned.get(key) or "").strip()
+        _contact_value(cleaned.get(key))
         for key in ("email", "phone", "location", "citizenship", "work_authorization")
     ]
     contact = [item for item in contact if item]
@@ -318,12 +329,9 @@ def build_blocks(data: dict) -> list[Block]:
             if extra:
                 blocks.append(_block("meta", extra))
 
-    extra_info = cleaned.get("additional_information") or {}
-    if isinstance(extra_info, dict) and extra_info:
-        blocks.append(_block("section", "Additional Information"))
-        for label, value in extra_info.items():
-            blocks.append(Block(kind="skills", label=str(label), runs=parse_highlights(str(value or ""))))
-
+    # "additional_information" is deliberately not rendered: the section is not part
+    # of the resume the tool is meant to produce, so the generator always skips it
+    # no matter what the model returns.
     return blocks
 
 
