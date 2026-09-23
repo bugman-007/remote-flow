@@ -1239,3 +1239,148 @@ async def test_theme_import_from_resume(api, workspace, fresh_client):
         files={"file": ("resume.pdf", b"%PDF-1.4", "application/pdf")},
     )
     assert rejected.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_provider_edit_create_and_delete_round_trip(api, workspace, fresh_client):
+    """SET-2: a Manager can create, edit and delete providers without a 422/500."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+
+    # Create with the RPM box left empty (the UI sends null) — it must not 422.
+    created = await manager.post(
+        "/api/v1/providers",
+        json={
+            "type": "openai_compatible",
+            "display_name": "Regression Completions",
+            "api_key": "sk-test",
+            "base_url": "https://api.example.com/v1",
+            "default_model": "some-model",
+            "max_concurrency": 4,
+            "rpm": None,
+            "timeout_s": 600,
+            "is_enabled": True,
+        },
+    )
+    assert created.status_code == 201, created.text
+    provider = created.json()
+    assert provider["rpm"] == 60
+
+    # Editing sends the whole form back, including `type`.
+    edited = await manager.patch(
+        f"/api/v1/providers/{provider['id']}",
+        json={
+            "type": "openai_compatible",
+            "display_name": "Regression Completions v2",
+            "base_url": "https://api.example.com/v1",
+            "default_model": "other-model",
+            "max_concurrency": 2,
+            "rpm": 30,
+            "timeout_s": 120,
+            "is_enabled": True,
+        },
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["display_name"] == "Regression Completions v2"
+    assert edited.json()["default_model"] == "other-model"
+
+    # Clearing a number input sends null — the current value is kept.
+    kept = await manager.patch(f"/api/v1/providers/{provider['id']}", json={"rpm": None, "max_concurrency": None})
+    assert kept.status_code == 200, kept.text
+    assert kept.json()["rpm"] == 30
+
+    deleted = await manager.delete(f"/api/v1/providers/{provider['id']}")
+    assert deleted.status_code == 200, deleted.text
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_provider_in_use_reassigns_profiles(api, workspace, fresh_client, db_session):
+    """SET-2: the mock provider can be deleted; profiles move to the default provider."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    providers = (await manager.get("/api/v1/providers")).json()["items"]
+    mock = next(item for item in providers if item["type"] == "mock")
+
+    # Make the demo provider the system default so the mock is deletable.
+    deepseek = await manager.post(
+        "/api/v1/providers",
+        json={
+            "type": "openai_compatible",
+            "display_name": "Replacement provider",
+            "api_key": "sk-test",
+            "base_url": "https://api.example.com/v1",
+            "default_model": "replacement-model",
+            "max_concurrency": 2,
+            "timeout_s": 60,
+        },
+    )
+    assert deepseek.status_code == 201, deepseek.text
+    defaulted = await manager.post(f"/api/v1/providers/{deepseek.json()['id']}/set-default")
+    assert defaulted.status_code == 200, defaulted.text
+
+    # Point the demo profile at the mock so the delete has something to reassign.
+    profile_id = str(workspace["profile"].id)
+    await manager.patch(f"/api/v1/profiles/{profile_id}", json={"provider_id": mock["id"]})
+
+    response = await manager.delete(f"/api/v1/providers/{mock['id']}")
+    assert response.status_code == 200, response.text
+    assert response.json()["profiles_reassigned"] == 1
+
+    profile = (await manager.get(f"/api/v1/profiles/{profile_id}")).json()
+    assert profile["provider_id"] == deepseek.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_models_get_the_litellm_prefix():
+    """CONC-5: a Gemini model typed without ``gemini/`` is routed correctly."""
+    from app.services.llm import litellm_model_name
+
+    assert litellm_model_name("google_gemini", "gemini-2.5-flash") == "gemini/gemini-2.5-flash"
+    assert litellm_model_name("google_gemini", "gemini/gemini-2.5-flash") == "gemini/gemini-2.5-flash"
+    assert litellm_model_name("openai_compatible", "deepseek-chat", "https://api.deepseek.com/v1") == "openai/deepseek-chat"
+    assert litellm_model_name("anthropic", "claude-sonnet-4-5") == "claude-sonnet-4-5"
+
+
+@pytest.mark.asyncio
+async def test_json_mode_is_picked_per_provider():
+    """GEN-3: DeepSeek rejects json_schema, so it is asked for json_object instead."""
+    from app.services.llm import ProviderConfig, is_response_format_error, json_response_format
+
+    schema = {"type": "object", "properties": {}}
+    deepseek = ProviderConfig(
+        id="1", type="openai_compatible", display_name="DeepSeek", model="deepseek-chat",
+        base_url="https://api.deepseek.com/v1",
+    )
+    openai = ProviderConfig(id="2", type="openai", display_name="OpenAI", model="gpt-4o")
+    gemini = ProviderConfig(id="3", type="google_gemini", display_name="Gemini", model="gemini-2.5-flash")
+
+    assert json_response_format(deepseek, schema) == {"type": "json_object"}
+    assert json_response_format(openai, schema)["type"] == "json_schema"
+    assert json_response_format(gemini, schema)["type"] == "json_schema"
+    assert is_response_format_error(Exception("This response_format type is unavailable now"))
+    assert not is_response_format_error(Exception("rate limit exceeded"))
+
+
+@pytest.mark.asyncio
+async def test_submit_without_a_profile_prompt_fails_fast(api, workspace, fresh_client):
+    """PRO-4: a profile with no saved prompt stops at submit instead of burning 10 LLM retries."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    created = await manager.post("/api/v1/profiles", json={"name": "No prompt yet"})
+    assert created.status_code == 201, created.text
+    profile_id = created.json()["id"]
+    assert created.json()["active_prompt"] is None
+
+    assigned = await manager.post(
+        f"/api/v1/profiles/{profile_id}/assignments",
+        json={"maker_ids": [str(workspace["maker_unassigned"].id)]},
+    )
+    assert assigned.status_code == 200, assigned.text
+
+    maker = await fresh_client("maker2@example.com", workspace["password"])
+    rejected = await maker.post("/api/v1/jobs", json={"jd_text": JD})
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["error"]["code"] == "profile_has_no_prompt"
+
+    # Saving a prompt version unblocks the very same submission.
+    saved = await manager.post(f"/api/v1/profiles/{profile_id}/prompt-versions", json={"body": "Write the resume."})
+    assert saved.status_code == 201, saved.text
+    accepted = await maker.post("/api/v1/jobs", json={"jd_text": JD})
+    assert accepted.status_code == 201, accepted.text

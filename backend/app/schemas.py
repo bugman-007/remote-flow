@@ -88,6 +88,11 @@ class AssignmentRequest(Model):
     maker_ids: list[str]
 
 
+PROVIDER_TYPE_VALUES = (
+    "anthropic", "openai", "azure_openai", "google_gemini", "openrouter", "openai_compatible", "mock"
+)
+
+
 class ProviderRequest(Model):
     type: Literal[
         "anthropic", "openai", "azure_openai", "google_gemini", "openrouter", "openai_compatible", "mock"
@@ -96,20 +101,24 @@ class ProviderRequest(Model):
     api_key: str | None = None
     base_url: str | None = None
     default_model: str | None = None
-    max_concurrency: int = 8
-    rpm: int = 60
-    timeout_s: int = 600
+    max_concurrency: int = Field(default=8, ge=1)
+    #: ``None`` means "no cap"; the router stores the 60 rpm default.
+    rpm: int | None = Field(default=None, ge=1)
+    timeout_s: int = Field(default=600, ge=5)
     is_enabled: bool = True
 
 
 class ProviderUpdate(Model):
+    type: Literal[
+        "anthropic", "openai", "azure_openai", "google_gemini", "openrouter", "openai_compatible", "mock"
+    ] | None = None
     display_name: str | None = None
     api_key: str | None = None
     base_url: str | None = None
     default_model: str | None = None
-    max_concurrency: int | None = None
-    rpm: int | None = None
-    timeout_s: int | None = None
+    max_concurrency: int | None = Field(default=None, ge=1)
+    rpm: int | None = Field(default=None, ge=1)
+    timeout_s: int | None = Field(default=None, ge=5)
     is_enabled: bool | None = None
 
 
@@ -243,6 +252,8 @@ class DuplicateInterviewRequest(Model):
 
 class TestPromptRequest(Model):
     jd_text: str
+    #: When set, test this text instead of the saved active prompt.
+    prompt_body: str | None = None
 
 
 class DocSetPatch(Model):

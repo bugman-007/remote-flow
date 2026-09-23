@@ -42,6 +42,7 @@ from app.schemas import (
 from app.serializers import provider_out, theme_out
 from app.services import events, metrics, pipeline, render, retention, settings_store, storage
 from app.services.crypto import decrypt_secret, encrypt_secret
+from app.services.llm import litellm_model_name
 from app.services.theme import (
     RENDER_FONTS,
     ThemeValidationError,
@@ -88,7 +89,7 @@ async def create_provider(
         base_url=payload.base_url,
         default_model=payload.default_model,
         max_concurrency=payload.max_concurrency,
-        rpm=payload.rpm,
+        rpm=payload.rpm or 60,
         timeout_s=payload.timeout_s,
         is_enabled=payload.is_enabled,
     )
@@ -122,8 +123,14 @@ async def update_provider(
     api_key = data.pop("api_key", None)
     if api_key:
         provider.api_key_enc = encrypt_secret(api_key)
+    # These columns are NOT NULL: a cleared number input means "keep the current value".
+    for key in ("max_concurrency", "rpm", "timeout_s"):
+        if key in data and data[key] is None:
+            data.pop(key)
     for key, value in data.items():
         setattr(provider, key, value)
+    if provider.type in {"openai_compatible", "azure_openai"} and not provider.base_url:
+        raise APIError("base_url_required", "This provider type needs a base URL.", status_code=422)
     session.add(
         AuditLog(actor_id=user.id, action="provider.update", entity_type="provider", entity_id=provider.id,
                  after={k: v for k, v in data.items()}, ip=client_ip(request))
@@ -142,15 +149,34 @@ async def delete_provider(
     if provider is None:
         raise APIError("not_found", "Provider not found.", status_code=404)
     if provider.is_default:
-        raise APIError("default_provider", "Choose another default provider first.", status_code=409)
-    in_use = (
-        await session.execute(select(func.count(Profile.id)).where(Profile.provider_id == provider.id))
-    ).scalar_one()
+        raise APIError(
+            "default_provider",
+            "This is the system default provider. Open another provider and choose "
+            "“Set as system default” first, then delete this one.",
+            status_code=409,
+        )
+    # Profiles pointing at this provider are moved to the default (or cleared) so the
+    # delete never trips the foreign key.
+    profiles = (
+        await session.execute(select(Profile).where(Profile.provider_id == provider.id))
+    ).scalars().all()
+    replacement = (
+        await session.execute(
+            select(LLMProvider)
+            .where(LLMProvider.is_default.is_(True), LLMProvider.is_enabled.is_(True))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    moved = 0
+    for profile in profiles:
+        profile.provider_id = replacement.id if replacement is not None else None
+        if replacement is not None:
+            moved += 1
     session.add(AuditLog(actor_id=user.id, action="provider.delete", entity_type="provider", entity_id=provider.id,
-                         before={"display_name": provider.display_name, "profiles": int(in_use or 0)}))
+                         before={"display_name": provider.display_name, "profiles": len(profiles)}))
     await session.delete(provider)
     await session.commit()
-    return {"ok": True, "profiles_now_on_default": int(in_use or 0)}
+    return {"ok": True, "profiles_reassigned": len(profiles), "profiles_now_on_default": moved}
 
 
 @router.post("/providers/{provider_id}/test")
@@ -177,7 +203,7 @@ async def test_provider(
 
         started = time.perf_counter()
         kwargs = {
-            "model": provider.default_model or "gpt-4o-mini",
+            "model": litellm_model_name(provider.type, provider.default_model or "gpt-4o-mini", provider.base_url),
             "messages": [{"role": "user", "content": "ping"}],
             "max_tokens": 1,
             "api_key": api_key,
@@ -256,7 +282,7 @@ async def list_models(provider_id: str, _: User = Depends(manager_required), ses
     suggestions = {
         "anthropic": ["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"],
         "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4.1"],
-        "google_gemini": ["gemini-2.0-flash", "gemini-1.5-pro"],
+        "google_gemini": ["gemini/gemini-2.5-flash", "gemini/gemini-2.5-pro", "gemini/gemini-2.0-flash"],
         "openrouter": ["openai/gpt-4o-mini", "anthropic/claude-sonnet-4"],
         "mock": ["mock"],
     }

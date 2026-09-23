@@ -193,7 +193,9 @@ function ProviderDialog({
         api_key: draft.api_key || undefined,
         base_url: draft.base_url || null,
         default_model: draft.default_model || null,
-        rpm: draft.rpm === "" ? null : Number(draft.rpm),
+        max_concurrency: Math.max(1, Number(draft.max_concurrency) || 1),
+        timeout_s: Math.max(5, Number(draft.timeout_s) || 600),
+        rpm: draft.rpm === "" ? null : Math.max(1, Number(draft.rpm) || 1),
       };
       if (provider) await api.patch(`/providers/${provider.id}`, payload);
       else await api.post("/providers", payload);
@@ -325,7 +327,7 @@ function ProviderDialog({
               if (!window.confirm(t("confirm.deleteProvider", { name: provider.display_name }))) return;
               try {
                 await api.del(`/providers/${provider.id}`);
-                push({ tone: "success", title: t("toast.updated") });
+                push({ tone: "success", title: t("settings.providers.deleted") });
                 onSaved();
               } catch (error) {
                 push({ tone: "error", title: errorMessage(error) });

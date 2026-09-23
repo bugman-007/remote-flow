@@ -428,6 +428,7 @@ const en = {
     tabs: { providers: "LLM Providers", themes: "Doc Themes", general: "General", retention: "Retention & disk", status: "System status" },
     providers: {
       create: "Add provider",
+      deleted: "Provider deleted",
       displayName: "Display name",
       type: "Type",
       apiKey: "API key",

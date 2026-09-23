@@ -322,6 +322,51 @@ def build_messages(provider: ProviderConfig, system: str, user: str) -> list[dic
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
+def litellm_model_name(provider_type: str, model: str, base_url: str | None = None) -> str:
+    """Add the LiteLLM routing prefix a provider needs when the Manager left it off.
+
+    ``gemini-2.5-flash`` on its own makes LiteLLM guess a provider and fail with a
+    confusing import error; ``gemini/gemini-2.5-flash`` routes to Google correctly.
+    """
+    name = (model or "").strip()
+    if not name or "/" in name:
+        return name
+    if provider_type == "google_gemini":
+        return f"gemini/{name}"
+    if provider_type == "openai_compatible" and base_url:
+        return f"openai/{name}"
+    return name
+
+
+#: OpenAI-compatible hosts that reject ``json_schema`` and only accept ``json_object``.
+JSON_OBJECT_HOSTS: tuple[str, ...] = ("deepseek.com",)
+_RESUME_SCHEMA_NAME = "resume"
+
+
+def json_schema_format(json_schema: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": _RESUME_SCHEMA_NAME, "schema": json_schema, "strict": False},
+    }
+
+
+def json_response_format(provider: ProviderConfig, json_schema: dict[str, Any]) -> dict[str, Any]:
+    """GEN-3: pick a JSON mode the provider actually supports.
+
+    DeepSeek (and a few other OpenAI-compatible gateways) answer ``json_schema``
+    with "This response_format type is unavailable now", so ask for plain
+    ``json_object`` there and let the schema repair loop do the validating.
+    """
+    host = (provider.base_url or "").lower()
+    if provider.type == "openai_compatible" and any(name in host for name in JSON_OBJECT_HOSTS):
+        return {"type": "json_object"}
+    return json_schema_format(json_schema)
+
+
+def is_response_format_error(exc: Exception) -> bool:
+    return "response_format" in str(exc).lower()
+
+
 class LiteLLMClient:
     """Thin LiteLLM adapter (library, not proxy). Imported lazily."""
 
@@ -329,9 +374,7 @@ class LiteLLMClient:
                             json_schema: dict, timeout_s: int) -> LLMResult:
         import litellm
 
-        model = provider.model
-        if provider.type == "openai_compatible" and provider.base_url and "/" not in model:
-            model = f"openai/{model}"
+        model = litellm_model_name(provider.type, provider.model, provider.base_url)
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": build_messages(provider, system, user),
@@ -342,16 +385,21 @@ class LiteLLMClient:
         }
         if provider.base_url:
             kwargs["api_base"] = provider.base_url
+        kwargs["response_format"] = json_response_format(provider, json_schema)
         kwargs.update(provider.params or {})
-        kwargs.setdefault(
-            "response_format",
-            {"type": "json_schema", "json_schema": {"name": "resume", "schema": json_schema, "strict": False}},
-        )
         started = time.perf_counter()
         try:
             response = await litellm.acompletion(**kwargs)
         except Exception as exc:  # noqa: BLE001 - mapped to a pipeline error code
-            raise map_provider_exception(exc) from exc
+            # Any other gateway that refuses json_schema still gets a JSON answer.
+            if kwargs["response_format"].get("type") == "json_schema" and is_response_format_error(exc):
+                kwargs["response_format"] = {"type": "json_object"}
+                try:
+                    response = await litellm.acompletion(**kwargs)
+                except Exception as second:  # noqa: BLE001
+                    raise map_provider_exception(second) from second
+            else:
+                raise map_provider_exception(exc) from exc
         latency_ms = int((time.perf_counter() - started) * 1000)
         raw = response.choices[0].message.content or ""
         usage = getattr(response, "usage", None)

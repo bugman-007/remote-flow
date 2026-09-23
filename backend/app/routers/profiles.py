@@ -327,8 +327,9 @@ async def test_prompt(
         temperature=snapshot["llm_params"].get("temperature"),
         max_tokens=snapshot["llm_params"].get("max_tokens"),
     )
-    prompt = ""
-    if profile.active_prompt_version_id:
+    # LLM-5: test the text in the editor when supplied, otherwise the saved version.
+    prompt = payload.prompt_body or ""
+    if not prompt and profile.active_prompt_version_id:
         version = await session.get(PromptVersion, profile.active_prompt_version_id)
         prompt = version.body if version else ""
     try:
@@ -363,8 +364,8 @@ async def test_prompt_pdf(
         temperature=snapshot["llm_params"].get("temperature"),
         max_tokens=snapshot["llm_params"].get("max_tokens"),
     )
-    prompt = ""
-    if profile.active_prompt_version_id:
+    prompt = payload.prompt_body or ""
+    if not prompt and profile.active_prompt_version_id:
         version = await session.get(PromptVersion, profile.active_prompt_version_id)
         prompt = version.body if version else ""
     try:
