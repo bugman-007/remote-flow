@@ -153,7 +153,7 @@ async def submit_jd(
             session, job=job, profile=profile, kind="initial", created_by=None
         )
     except SnapshotError as exc:
-        raise IntakeError("no_provider_configured", str(exc), status_code=409) from exc
+        raise IntakeError(getattr(exc, "code", "no_provider_configured"), str(exc), status_code=409) from exc
 
     directory = storage.doc_set_dir(maker.id, day, seq_no, "pending")
     storage.ensure_dir(directory)

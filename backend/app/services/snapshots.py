@@ -17,8 +17,27 @@ from vendor.resume_builder import core
 logger = logging.getLogger(__name__)
 
 
-class SnapshotError(RuntimeError):
-    pass
+class SnapshotError(ValueError):
+    """A job that cannot be turned into a generation.
+
+    Subclasses :class:`ValueError` so routers map it to a 4xx, not a 500. ``code``
+    is surfaced to the Maker so the message is actionable (e.g. the assigned
+    profile still has no prompt version saved).
+    """
+
+    def __init__(self, message: str, code: str = "no_provider_configured") -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def ensure_profile_has_prompt(profile: Profile) -> None:
+    """PRO-4: without a prompt the model has no instructions and every LLM attempt fails."""
+    if profile.active_prompt_version_id is None:
+        raise SnapshotError(
+            "the profile assigned to this job has no prompt yet. Open Profiles → Prompt "
+            "and save a prompt version, then retry.",
+            code="profile_has_no_prompt",
+        )
 
 
 async def resolve_profile_snapshot(session: AsyncSession, profile: Profile) -> dict:
@@ -75,6 +94,7 @@ async def create_generation(
     kind: str,
     created_by: str | None = None,
 ) -> Generation:
+    ensure_profile_has_prompt(profile)
     snapshot = await resolve_profile_snapshot(session, profile)
     generation = Generation(
         job_id=job.id,

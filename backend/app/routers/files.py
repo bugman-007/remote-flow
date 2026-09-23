@@ -15,6 +15,7 @@ from app.deps import client_ip, current_user
 from app.errors import APIError
 from app.models import AuditLog, DocSet, FileArtifact, Generation, Interview, Job, User
 from app.services import storage
+from app.utils import utcnow
 
 router = APIRouter(tags=["files"])
 
@@ -121,6 +122,7 @@ async def build_zip(
     ip: str | None = None,
 ) -> tuple[StreamingResponse, int]:
     entries: list[tuple[Path, str]] = []
+    included: list[DocSet] = []
     skipped = 0
     for doc_set in doc_sets:
         job = await session.get(Job, doc_set.job_id)
@@ -146,7 +148,8 @@ async def build_zip(
         if len(files) < 3:
             skipped += 1
             continue
-        folder = storage.doc_set_zip_folder(job.seq_no, doc_set.company_name, doc_set.job_title)
+        included.append(doc_set)
+        folder = storage.doc_set_zip_folder(job.submitted_at, doc_set.company_name, doc_set.job_title)
         for artifact in files:
             try:
                 entries.append((storage.safe_relative(artifact.path), f"{folder}/{artifact.filename}"))
@@ -154,6 +157,11 @@ async def build_zip(
                 continue
     if not entries:
         raise APIError("nothing_to_download", "No ready doc sets matched the selection.", status_code=409)
+    # RES-14: a Maker download clears the "New" flag for the sets actually included.
+    if user.role == "maker":
+        now = utcnow()
+        for doc_set in included:
+            doc_set.downloaded_at = now
     # SEC-7: record which doc sets were downloaded, even when some were skipped.
     for doc_set in doc_sets:
         session.add(

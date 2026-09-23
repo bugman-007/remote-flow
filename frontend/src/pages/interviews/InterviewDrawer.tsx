@@ -1,15 +1,51 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { CalendarPlus, Copy, Eye, Repeat } from "lucide-react";
+import { CalendarPlus, Eye, Plus, Repeat } from "lucide-react";
 import { api, downloadBlob, errorMessage } from "../../lib/api";
 import { Drawer } from "../../ui/dialog";
-import { Badge, Button, Card, CardHeader, ErrorNote, Field, Input, Select, Spinner, Textarea } from "../../ui/primitives";
+import { Badge, Button, Card, CardHeader, Checkbox, ErrorNote, Field, Input, Select, Spinner, Textarea } from "../../ui/primitives";
 import { useToast } from "../../ui/toast";
 import { FileChips } from "../../components/FileChips";
 import { formatDateTime } from "../../lib/format";
 import { t } from "../../i18n";
-import type { Feedback, Interview, User } from "../../types";
+import type { Feedback, Interview, InterviewStatus, InterviewStep, User } from "../../types";
 import type { Paginated } from "../../types";
+
+/** INT-9: reviewers read the meeting time in a time zone they pick (EST by default). */
+const DEFAULT_TZ = "America/New_York";
+const TZ_FALLBACK = [
+  "America/New_York",
+  "America/Chicago",
+  "America/Denver",
+  "America/Los_Angeles",
+  "UTC",
+  "Europe/London",
+  "Europe/Berlin",
+  "Asia/Kolkata",
+  "Asia/Tokyo",
+  "Australia/Sydney",
+];
+
+function timeZones(): string[] {
+  const supported = (Intl as unknown as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf;
+  if (typeof supported === "function") {
+    try {
+      return supported("timeZone");
+    } catch {
+      return TZ_FALLBACK;
+    }
+  }
+  return TZ_FALLBACK;
+}
+
+function formatInZone(iso: string | null | undefined, timeZone: string): string {
+  if (!iso) return "—";
+  try {
+    return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short", timeZone }).format(new Date(iso));
+  } catch {
+    return formatDateTime(iso);
+  }
+}
 
 export function InterviewDrawer({
   interviewId,
@@ -36,9 +72,25 @@ export function InterviewDrawer({
     enabled: Boolean(interviewId) && isManager,
   });
 
+  const taxonomy = useQuery({
+    queryKey: ["interview-taxonomy"],
+    queryFn: () => api.get<{ steps: InterviewStep[]; statuses: InterviewStatus[] }>("/interview-taxonomy"),
+    enabled: Boolean(interviewId) && isManager,
+  });
+
   const data = interview.data;
   const [feedback, setFeedback] = useState<Partial<Feedback>>({});
   const [values, setValues] = useState<Record<string, unknown>>({});
+  const [timeZone, setTimeZone] = useState(DEFAULT_TZ);
+  const [tzTouched, setTzTouched] = useState(false);
+  const [nextStepId, setNextStepId] = useState("");
+  const [nextStepReviewer, setNextStepReviewer] = useState("");
+  const [stepBusy, setStepBusy] = useState(false);
+  const zones = useMemo(() => timeZones(), []);
+
+  useEffect(() => {
+    if (!tzTouched && data?.meeting_tz) setTimeZone(data.meeting_tz);
+  }, [data?.meeting_tz, tzTouched]);
 
   useEffect(() => {
     if (data?.feedback) setFeedback(data.feedback);
@@ -88,6 +140,33 @@ export function InterviewDrawer({
     }
   };
 
+  const updateStepRecord = async (recordId: string, body: Record<string, unknown>) => {
+    try {
+      await api.patch(`/interviews/${interviewId}/steps/${recordId}`, body);
+      await refresh();
+    } catch (error) {
+      push({ tone: "error", title: errorMessage(error) });
+    }
+  };
+
+  const addNextStep = async () => {
+    setStepBusy(true);
+    try {
+      await api.post(`/interviews/${interviewId}/steps`, {
+        step_id: nextStepId || null,
+        reviewer_id: nextStepReviewer || null,
+      });
+      setNextStepId("");
+      setNextStepReviewer("");
+      push({ tone: "success", title: t("toast.saved") });
+      await refresh();
+    } catch (error) {
+      push({ tone: "error", title: errorMessage(error) });
+    } finally {
+      setStepBusy(false);
+    }
+  };
+
   const fields = (data?.template_snapshot?.fields ?? []).filter((field) => !field.builtin || field.key !== "reviewer");
   const meetingPassed = data?.meeting_at ? new Date(data.meeting_at).getTime() <= Date.now() : false;
   const canGiveFeedback = !isManager && (meetingPassed || data?.status === "completed" || data?.status === "no_show");
@@ -99,7 +178,8 @@ export function InterviewDrawer({
       title={
         data ? (
           <span className="flex flex-wrap items-center gap-2">
-            {data.doc_set?.company_name ?? t("common.unknown")} · {data.doc_set?.job_title ?? ""}
+            {data.doc_set?.company_name ?? data.company_name ?? t("common.unknown")} ·{" "}
+            {data.doc_set?.job_title ?? data.job_title ?? ""}
             <Badge tone={data.status === "completed" ? "success" : data.status === "cancelled" ? "neutral" : "info"}>
               {t(`interviews.status.${data.status}`)}
             </Badge>
@@ -143,7 +223,10 @@ export function InterviewDrawer({
           ) : null}
 
           <Card>
-            <CardHeader title={t("interviews.detail")} description={formatDateTime(data.meeting_at)} />
+            <CardHeader
+              title={t("interviews.detail")}
+              description={`${data.doc_set?.company_name ?? data.company_name ?? "—"} · ${data.doc_set?.job_title ?? data.job_title ?? "—"}`}
+            />
             <dl className="grid gap-2 text-sm tablet:grid-cols-2">
               <div>
                 <dt className="rf-label">{t("interviews.reviewer")}</dt>
@@ -152,18 +235,191 @@ export function InterviewDrawer({
               <div>
                 <dt className="rf-label">{t("interviews.meetingAt")}</dt>
                 <dd>
-                  {data.meeting_at ? new Date(data.meeting_at).toLocaleString() : "—"}
-                  <span className="ml-1 text-xs text-muted-foreground" title={t("interviews.meetingTz", { tz: data.meeting_tz ?? "UTC" })}>
-                    ({data.meeting_tz ?? "UTC"})
-                  </span>
+                  {formatInZone(data.meeting_at, timeZone)}
+                  {values.meeting_end_time ? ` – ${String(values.meeting_end_time)}` : ""}
+                </dd>
+              </div>
+              <div className="tablet:col-span-2">
+                <dt className="rf-label">{t("interviews.meetingTzLabel")}</dt>
+                <dd>
+                  <Select
+                    className="h-8 w-64 text-xs"
+                    value={timeZone}
+                    onChange={(event) => {
+                      setTzTouched(true);
+                      setTimeZone(event.target.value);
+                    }}
+                  >
+                    {zones.map((zone) => (
+                      <option key={zone} value={zone}>
+                        {zone}
+                      </option>
+                    ))}
+                  </Select>
+                </dd>
+              </div>
+              <div className="tablet:col-span-2">
+                <dt className="rf-label">{t("interviews.techStack")}</dt>
+                <dd>
+                  {isManager ? (
+                    <Input
+                      className="h-8 text-sm"
+                      placeholder={t("interviews.techStackHint")}
+                      defaultValue={data.tech_stack ?? ""}
+                      onBlur={(event) => {
+                        if ((event.target.value ?? "") !== (data.tech_stack ?? "")) {
+                          void patch({ tech_stack: event.target.value }, t("toast.updated"));
+                        }
+                      }}
+                    />
+                  ) : (
+                    <span>{data.tech_stack || "—"}</span>
+                  )}
                 </dd>
               </div>
             </dl>
           </Card>
 
           <Card>
-            <CardHeader title={t("resumes.columns.files")} />
+            <CardHeader title={t("interviews.stepHistory")} description={t("interviews.stepHistoryHint")} />
+            {data.steps.length === 0 ? (
+              <p className="text-sm text-muted-foreground">{t("interviews.noSteps")}</p>
+            ) : (
+              <div className="space-y-2">
+                {data.steps.map((record, index) => {
+                  const color = record.step_color ?? "#64748b";
+                  const current = index === data.steps.length - 1;
+                  return (
+                    <div
+                      key={record.id}
+                      className="flex flex-wrap items-center gap-3 rounded border border-border px-3 py-2"
+                      style={current ? { borderColor: color } : undefined}
+                    >
+                      <span className="flex items-center gap-2 text-sm font-medium" style={{ color }}>
+                        <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: color }} />
+                        {record.step_name ?? "—"}
+                        {current ? <Badge tone="outline">{t("interviews.currentStep")}</Badge> : null}
+                      </span>
+                      {isManager ? (
+                        <Select
+                          className="h-8 w-40 text-xs"
+                          value={record.reviewer_id ?? ""}
+                          onChange={(event) => void updateStepRecord(record.id, { reviewer_id: event.target.value })}
+                        >
+                          <option value="">—</option>
+                          {(reviewers.data?.items ?? []).map((reviewer) => (
+                            <option key={reviewer.id} value={reviewer.id}>
+                              {reviewer.name}
+                            </option>
+                          ))}
+                        </Select>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">{record.reviewer_name ?? "—"}</span>
+                      )}
+                      {isManager ? (
+                        <>
+                          <label className="flex items-center gap-1 text-xs">
+                            <Checkbox
+                              checked={record.done}
+                              onChange={(event) => void updateStepRecord(record.id, { done: event.target.checked })}
+                            />
+                            {t("interviews.stepDone")}
+                          </label>
+                          <label className="flex items-center gap-1 text-xs">
+                            <Checkbox
+                              checked={record.rejected}
+                              onChange={(event) => void updateStepRecord(record.id, { rejected: event.target.checked })}
+                            />
+                            {t("interviews.stepRejected")}
+                          </label>
+                          <Input
+                            className="h-8 w-48 text-xs"
+                            placeholder={t("interviews.stepNote")}
+                            defaultValue={record.note ?? ""}
+                            onBlur={(event) => {
+                              if (event.target.value !== (record.note ?? "")) {
+                                void updateStepRecord(record.id, { note: event.target.value });
+                              }
+                            }}
+                          />
+                        </>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">
+                          {record.done
+                            ? t("interviews.stepDone")
+                            : record.rejected
+                              ? t("interviews.stepRejected")
+                              : record.note ?? ""}
+                        </span>
+                      )}
+                      {record.done_at ? (
+                        <span className="text-xs text-muted-foreground">
+                          {t("interviews.doneAt", { date: formatDateTime(record.done_at) })}
+                        </span>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {isManager ? (
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <Select className="h-8 w-44 text-xs" value={nextStepId} onChange={(event) => setNextStepId(event.target.value)}>
+                  <option value="">{t("interviews.step")}</option>
+                  {(taxonomy.data?.steps ?? []).map((step) => (
+                    <option key={step.id} value={step.id}>
+                      {step.name}
+                    </option>
+                  ))}
+                </Select>
+                <Select
+                  className="h-8 w-40 text-xs"
+                  value={nextStepReviewer}
+                  onChange={(event) => setNextStepReviewer(event.target.value)}
+                >
+                  <option value="">{t("interviews.reviewer")}</option>
+                  {(reviewers.data?.items ?? []).map((reviewer) => (
+                    <option key={reviewer.id} value={reviewer.id}>
+                      {reviewer.name}
+                    </option>
+                  ))}
+                </Select>
+                <Button size="sm" variant="outline" loading={stepBusy} onClick={() => void addNextStep()}>
+                  <Plus className="h-3.5 w-3.5" />
+                  {t("interviews.addStepAction")}
+                </Button>
+              </div>
+            ) : null}
+          </Card>
+
+          <Card>
+            <CardHeader title={t("interviews.resumeAndJd")} description={t("interviews.resumeAndJdHint")} />
             <FileChips files={data.files} />
+            {data.attachments.length ? (
+              <ul className="mt-2 flex flex-wrap gap-2">
+                {data.attachments.map((attachment) => (
+                  <li key={attachment.id}>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={async () => {
+                        try {
+                          const blob = await api.requestBlob(
+                            `/interviews/${data.id}/attachments/${attachment.id}`,
+                          );
+                          await downloadBlob(blob, attachment.filename);
+                        } catch (error) {
+                          push({ tone: "error", title: errorMessage(error) });
+                        }
+                      }}
+                    >
+                      {attachment.kind === "resume" ? t("interviews.attachResume") : t("interviews.attachJd")} ·{" "}
+                      {attachment.filename}
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
             {data.files.length ? (
               <Button
                 className="mt-2"
@@ -171,7 +427,7 @@ export function InterviewDrawer({
                 variant="outline"
                 onClick={async () => {
                   try {
-                    const blob = await api.requestBlob(`/doc-sets/${data.doc_set_id}/zip`, {
+                    const blob = await api.requestBlob(`/doc-sets/${data.doc_set_id ?? ""}/zip`, {
                       query: { generation: data.generation_id },
                     });
                     await downloadBlob(blob, `documents-${data.doc_set?.company_name ?? data.id}.zip`);
@@ -190,7 +446,7 @@ export function InterviewDrawer({
               <CardHeader title={t("profiles.title")} />
               <dl className="grid gap-2 text-sm tablet:grid-cols-2">
                 {Object.entries(data.profile)
-                  .filter(([, value]) => value !== null && value !== undefined)
+                  .filter(([key, value]) => key !== "id" && value !== null && value !== undefined && value !== "")
                   .map(([key, value]) => (
                     <div key={key}>
                       <dt className="rf-label">{key.replace(/_/g, " ")}</dt>
@@ -205,7 +461,9 @@ export function InterviewDrawer({
             <Card>
               <CardHeader title={t("interviews.sharedProfile")} />
               <dl className="grid gap-2 text-sm tablet:grid-cols-2">
-                {Object.entries(data.profile).map(([key, value]) => (
+                {Object.entries(data.profile)
+                  .filter(([key, value]) => key !== "id" && value !== null && value !== undefined && value !== "")
+                  .map(([key, value]) => (
                   <div key={key}>
                     <dt className="rf-label">{key.replace(/_/g, " ")}</dt>
                     <dd className="break-words">{String(value)}</dd>
@@ -216,8 +474,43 @@ export function InterviewDrawer({
           ) : null}
 
           <Card>
-            <CardHeader title={t("interviews.detail")} />
+            <CardHeader title={t("interviews.sharedInfo")} />
             <div className="grid gap-3 tablet:grid-cols-2">
+              {isManager ? (
+                <>
+                  <div>
+                    <p className="rf-label">{t("interviews.companyContact")}</p>
+                    <Input
+                      placeholder={t("interviews.companyContactHint")}
+                      value={String(values.company_contact ?? "")}
+                      onChange={(event) => setValues({ ...values, company_contact: event.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <p className="rf-label">{t("interviews.recruiter")}</p>
+                    <Input
+                      placeholder={t("interviews.recruiterHint")}
+                      value={String(values.recruiter ?? "")}
+                      onChange={(event) => setValues({ ...values, recruiter: event.target.value })}
+                    />
+                  </div>
+                </>
+              ) : (
+                <>
+                  {values.company_contact ? (
+                    <div>
+                      <p className="rf-label">{t("interviews.companyContact")}</p>
+                      <p className="text-sm">{String(values.company_contact)}</p>
+                    </div>
+                  ) : null}
+                  {values.recruiter ? (
+                    <div>
+                      <p className="rf-label">{t("interviews.recruiter")}</p>
+                      <p className="text-sm">{String(values.recruiter)}</p>
+                    </div>
+                  ) : null}
+                </>
+              )}
               {fields
                 .filter((field) => isManager || field.visible_to_reviewer)
                 .map((field) => (
@@ -268,30 +561,18 @@ export function InterviewDrawer({
                     </option>
                   ))}
                 </Select>
-                <Button size="sm" variant="outline" onClick={() => void patch({ status: "completed" }, t("toast.updated"))}>
-                  {t("interviews.status.completed")}
-                </Button>
-                <Button size="sm" variant="outline" onClick={() => void patch({ status: "no_show" }, t("toast.updated"))}>
-                  {t("interviews.status.no_show")}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={async () => {
-                    const reviewerId = window.prompt(t("interviews.duplicateTo"), data.reviewer_id ?? "");
-                    if (!reviewerId) return;
-                    try {
-                      await api.post(`/interviews/${data.id}/duplicate`, { reviewer_id: reviewerId });
-                      push({ tone: "success", title: t("toast.saved") });
-                      void queryClient.invalidateQueries({ queryKey: ["interviews"] });
-                    } catch (error) {
-                      push({ tone: "error", title: errorMessage(error) });
-                    }
-                  }}
+                <Select
+                  className="h-8 w-40 text-xs"
+                  value={data.status_id ?? ""}
+                  onChange={(event) => void patch({ status_id: event.target.value || null }, t("toast.updated"))}
                 >
-                  <Copy className="h-3.5 w-3.5" />
-                  {t("interviews.duplicate")}
-                </Button>
+                  <option value="">{t("interviews.statusLabel")}</option>
+                  {(taxonomy.data?.statuses ?? []).map((status) => (
+                    <option key={status.id} value={status.id}>
+                      {status.name}
+                    </option>
+                  ))}
+                </Select>
                 <Button
                   size="sm"
                   variant="outline"
@@ -368,9 +649,12 @@ export function InterviewDrawer({
             </Card>
           ) : null}
 
-          {canGiveFeedback ? (
+          {!isManager ? (
             <Card>
-              <CardHeader title={data.feedback ? t("interviews.feedbackEdit") : t("interviews.feedback")} description={t("interviews.meetingTz", { tz: data.meeting_tz ?? "UTC" })} />
+              <CardHeader
+                title={data.feedback ? t("interviews.feedbackEdit") : t("interviews.commentBox")}
+                description={canGiveFeedback ? t("interviews.commentBoxHint") : t("interviews.feedbackOpensAfter")}
+              />
               <div className="grid gap-3 tablet:grid-cols-2">
                 <Field label={t("interviews.feedbackOutcome")}>
                   <Select
@@ -404,10 +688,10 @@ export function InterviewDrawer({
                   <Textarea value={feedback.concerns ?? ""} onChange={(event) => setFeedback({ ...feedback, concerns: event.target.value })} />
                 </Field>
               </div>
-              <Field label={t("interviews.feedbackNotes")}>
+              <Field label={isManager ? t("interviews.feedbackNotes") : t("interviews.commentBox")}>
                 <Textarea value={feedback.notes ?? ""} onChange={(event) => setFeedback({ ...feedback, notes: event.target.value })} />
               </Field>
-              <Button size="sm" onClick={() => void submitFeedback()}>
+              <Button size="sm" onClick={() => void submitFeedback()} disabled={!canGiveFeedback}>
                 {t("interviews.feedbackSubmit")}
               </Button>
             </Card>

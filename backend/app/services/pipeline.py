@@ -845,6 +845,7 @@ async def retry_now(session: AsyncSession, *, job: Job, mode: str, actor_id: str
         profile = await session.get(Profile, job.profile_id) if job.profile_id else None
         if profile is None:
             raise ValueError("job has no profile")
+        snapshots.ensure_profile_has_prompt(profile)
         snapshot = await snapshots.resolve_profile_snapshot(session, profile)
         previous = {
             "prompt_version_id": generation.prompt_version_id,

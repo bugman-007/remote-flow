@@ -23,6 +23,7 @@ export function RetentionTab() {
   const [plan, setPlan] = useState<RetentionPlan | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const settings = useQuery({
     queryKey: ["settings"],
@@ -43,10 +44,13 @@ export function RetentionTab() {
 
   const save = async () => {
     setError(null);
+    setSaving(true);
     try {
       await api.patch("/settings", { values: draft });
     } catch (caught) {
       setError(errorMessage(caught));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -57,7 +61,7 @@ export function RetentionTab() {
           title={t("settings.tabs.retention")}
           actions={
             <>
-              <Button size="sm" variant="outline" onClick={() => void save()}>
+              <Button size="sm" variant="outline" onClick={() => void save()} loading={saving}>
                 {t("common.save")}
               </Button>
               <Button
@@ -73,7 +77,7 @@ export function RetentionTab() {
                     setBusy(false);
                   }
                 }}
-                disabled={busy}
+                loading={busy}
               >
                 {t("settings.retention.dryRun")}
               </Button>

@@ -16,7 +16,7 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "timezone": "UTC",
     "default_daily_limit": 100,
     "min_jd_chars": 50,
-    "max_jd_chars": 20000,
+    "max_jd_chars": 200000,
     "llm_timeout_s": 600,
     "render_timeout_s": 180,
     "max_llm_attempts": 10,

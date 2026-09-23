@@ -122,7 +122,7 @@ export function ConfirmDialog({
           <Button variant="outline" onClick={onCancel} disabled={busy}>
             {t("common.cancel")}
           </Button>
-          <Button variant={destructive ? "destructive" : "primary"} onClick={onConfirm} disabled={busy}>
+          <Button variant={destructive ? "destructive" : "primary"} onClick={onConfirm} loading={busy}>
             {confirmLabel ?? t("common.confirm")}
           </Button>
         </>

@@ -6,6 +6,7 @@ import asyncio
 import io
 import os
 import shutil
+import uuid
 import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -43,6 +44,20 @@ def attempts_dir(doc_set_path: Path, stage: str, attempt_no: int) -> Path:
 
 def generation_dir(doc_set_path: Path, generation_no: int) -> Path:
     return doc_set_path / f"gen-{generation_no:02d}"
+
+
+def interview_attachment_dir(owner_id: str) -> Path:
+    return storage_root() / "interview-attachments" / owner_id
+
+
+def store_interview_attachment(*, interview_id: str, kind: str, filename: str, payload: bytes) -> StoredFile:
+    """INT-16: write an uploaded resume/JD as-is (no conversion, no pipeline)."""
+    safe_name = slugify(Path(filename).stem, fallback=kind)
+    suffix = Path(filename).suffix.lower() or ".bin"
+    target = interview_attachment_dir(interview_id) / f"{uuid.uuid4().hex[:8]}_{safe_name}{suffix}"
+    ensure_dir(target.parent)
+    target.write_bytes(payload)
+    return stat_file(target, kind=kind)
 
 
 def tmp_dir() -> Path:
@@ -109,10 +124,16 @@ async def zip_entries_async(entries: list[tuple[Path, str]]) -> io.BytesIO:
     return await asyncio.to_thread(zip_entries, entries)
 
 
-def doc_set_zip_folder(seq_no: int, company: str | None, role: str | None) -> str:
+def doc_set_zip_folder(submitted_at, company: str | None, role: str | None) -> str:
+    """Per-doc-set folder inside a ZIP: ``YYYY-MM-DD_HHMMSS_Company_Job-Title``.
+
+    The timestamp leads so that sorting the extracted folders by name matches the
+    Maker's submission (browser-tab) order.
+    """
+    stamp = submitted_at.strftime("%Y-%m-%d_%H%M%S") if submitted_at is not None else "undated"
     company_part = slugify(company, fallback="Company").replace("-", "_")
     role_part = slugify(role, fallback="Role").replace("-", "_")
-    return f"{seq_no:03d}_{company_part}_{role_part}"
+    return f"{stamp}_{company_part}_{role_part}"
 
 
 def download_filename(basename: str, kind: str) -> str:
@@ -120,9 +141,18 @@ def download_filename(basename: str, kind: str) -> str:
     return f"{basename}{suffix}"
 
 
-def zip_name_for_date(maker_name: str, day: date, suffix: str = "all") -> str:
+def zip_name_for_date(maker_name: str, day: date | None, suffix: str = "all") -> str:
     safe_maker = slugify(maker_name, fallback="maker")
-    return f"{safe_maker}_{day.isoformat()}_{suffix}.zip"
+    stamp = day.isoformat() if day else "range"
+    return f"{safe_maker}_{stamp}_{suffix}.zip"
+
+
+def zip_name_for_range(maker_name: str, date_from: date | None, date_to: date | None) -> str:
+    """RES-1: name a range download ``maker_YYYY-MM-DD_YYYY-MM-DD.zip``."""
+    safe_maker = slugify(maker_name, fallback="maker")
+    start = date_from.isoformat() if date_from else "start"
+    end = date_to.isoformat() if date_to else "end"
+    return f"{safe_maker}_{start}_{end}.zip"
 
 
 def disk_usage_pct() -> float:

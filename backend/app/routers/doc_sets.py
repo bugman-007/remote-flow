@@ -66,6 +66,7 @@ async def row_for(
             "is_selected": doc_set.is_selected,
             "keep": doc_set.keep,
             "expired": doc_set.files_expired_at is not None,
+            "downloaded_at": doc_set.downloaded_at,
             "interview_count": interview_count,
         }
     )
@@ -191,6 +192,7 @@ async def _interview_counts(session: AsyncSession, doc_set_ids: list[str]) -> di
 
 SORT_KEYS = {
     "seq": lambda row: (row["submitted_date"] or "", row["seq_no"]),
+    "submitted": lambda row: (str(row.get("submitted_at") or row["submitted_date"] or ""), row["seq_no"]),
     "company": lambda row: ((row.get("doc_set") or {}).get("company_name") or "").lower(),
     "status": lambda row: ((row.get("status") or {}).get("status") or "", row["seq_no"]),
     "ready": lambda row: (row.get("released_at") or "", row["seq_no"]),
@@ -214,9 +216,50 @@ def _matches_status(status: str, job: Job, payload: dict, doc_set: DocSet) -> bo
         "expired": lambda: doc_set.files_expired_at is not None,
         "selected": lambda: doc_set.is_selected,
         "waiting": lambda: derived.get("status") == "waiting",
+        "new": lambda: doc_set.downloaded_at is None,
     }
     check = mapping.get(status)
     return check() if check else True
+
+
+@router.get("/doc-sets/zip")
+async def zip_date(
+    request: Request,
+    day: date | None = Query(default=None, alias="date"),
+    date_from: date | None = None,
+    date_to: date | None = None,
+    maker_id: str | None = None,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    if user.role == "reviewer":
+        raise APIError("forbidden", "Reviewers cannot bulk download.", status_code=403)
+    query = select(DocSet).join(Job, Job.id == DocSet.job_id).where(Job.delivery_status == "released")
+    if day:
+        query = query.where(Job.submitted_date == day)
+    else:
+        if date_from:
+            query = query.where(Job.submitted_date >= date_from)
+        if date_to:
+            query = query.where(Job.submitted_date <= date_to)
+    if user.role == "maker":
+        query = query.where(Job.maker_id == user.id)
+    elif maker_id:
+        query = query.where(Job.maker_id == maker_id)
+    doc_sets = (await session.execute(query.order_by(Job.seq_no))).scalars().all()
+    if not doc_sets:
+        raise APIError("nothing_to_download", "No ready doc sets for that date.", status_code=409)
+    first_job = await session.get(Job, doc_sets[0].job_id)
+    maker = await session.get(User, first_job.maker_id) if first_job else None
+    response, _skipped = await build_zip(session, user, list(doc_sets), ip=client_ip(request))
+    maker_name = maker.name if maker else "maker"
+    filename = (
+        storage.zip_name_for_date(maker_name, day)
+        if day
+        else storage.zip_name_for_range(maker_name, date_from, date_to)
+    )
+    response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+    return response
 
 
 @router.get("/doc-sets/{doc_set_id}")
@@ -520,31 +563,4 @@ async def zip_selection(
     if not doc_sets:
         raise APIError("not_found", "No matching doc sets.", status_code=404)
     response, _skipped = await build_zip(session, user, doc_sets, generation_id=payload.generation, ip=client_ip(request))
-    return response
-
-
-@router.get("/doc-sets/zip")
-async def zip_date(
-    request: Request,
-    day: date = Query(alias="date"),
-    maker_id: str | None = None,
-    user: User = Depends(current_user),
-    session: AsyncSession = Depends(get_session),
-):
-    if user.role == "reviewer":
-        raise APIError("forbidden", "Reviewers cannot bulk download.", status_code=403)
-    query = select(DocSet).join(Job, Job.id == DocSet.job_id).where(Job.submitted_date == day, Job.delivery_status == "released")
-    if user.role == "maker":
-        query = query.where(Job.maker_id == user.id)
-    elif maker_id:
-        query = query.where(Job.maker_id == maker_id)
-    doc_sets = (await session.execute(query.order_by(Job.seq_no))).scalars().all()
-    if not doc_sets:
-        raise APIError("nothing_to_download", "No ready doc sets for that date.", status_code=409)
-    first_job = await session.get(Job, doc_sets[0].job_id)
-    maker = await session.get(User, first_job.maker_id) if first_job else None
-    response, _skipped = await build_zip(session, user, list(doc_sets), ip=client_ip(request))
-    response.headers["Content-Disposition"] = (
-        f"attachment; filename={storage.zip_name_for_date(maker.name if maker else 'maker', day)}"
-    )
     return response

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import csv
 import io
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import func, or_, select
@@ -12,12 +14,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.deps import client_ip, csrf_protect, manager_required
 from app.errors import APIError
-from app.models import AuditLog, Interview, Profile, ProfileAssignment, User
+from app.models import (
+    AuditLog,
+    DocSet,
+    Interview,
+    InterviewStep,
+    InterviewStepRecord,
+    Job,
+    Profile,
+    ProfileAssignment,
+    User,
+)
 from app.schemas import CsvImportRequest, UserRequest, UserUpdate
 from app.security import generate_password, hash_password, normalise_email
 from app.serializers import user_out
 from app.services import intake, sessions as session_service, settings_store
 from app.utils import utcnow
+
+_MISSING = object()
 
 router = APIRouter(prefix="/users", tags=["users"], dependencies=[Depends(csrf_protect)])
 
@@ -27,6 +41,104 @@ async def _active_manager_count(session: AsyncSession, *, excluding: str | None 
     if excluding:
         query = query.where(User.id != excluding)
     return int((await session.execute(query)).scalar_one() or 0)
+
+
+async def _day_start(session: AsyncSession, day) -> datetime:
+    """Midnight of ``day`` in the configured server timezone (used for "today" counts)."""
+    tz_name = await settings_store.get_setting(session, "timezone") or "UTC"
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:  # noqa: BLE001
+        tz = ZoneInfo("UTC")
+    return datetime.combine(day, time.min, tzinfo=tz)
+
+
+async def _bulk_stats(session: AsyncSession, users: list[User], day) -> dict[str, dict]:
+    """USR-9: card stats for the Maker/Reviewer sections, computed in bulk."""
+    maker_ids = [user.id for user in users if user.role == "maker"]
+    reviewer_ids = [user.id for user in users if user.role == "reviewer"]
+    stats: dict[str, dict] = {}
+    for user in users:
+        if user.role == "maker":
+            stats[user.id] = {
+                "total_resumes": 0,
+                "resumes_today": 0,
+                "interviews": 0,
+                "interview_pct": 0.0,
+            }
+        elif user.role == "reviewer":
+            stats[user.id] = {"reviews_today": 0, "total_interviews": 0, "by_step": []}
+
+    if maker_ids:
+        resume_counts = (await session.execute(
+            select(Job.maker_id, func.count(DocSet.id))
+            .join(DocSet, DocSet.job_id == Job.id)
+            .where(Job.maker_id.in_(maker_ids))
+            .group_by(Job.maker_id)
+        )).all()
+        for maker_id, count in resume_counts:
+            if maker_id in stats:
+                stats[maker_id]["total_resumes"] = int(count or 0)
+        today_counts = (await session.execute(
+            select(Job.maker_id, func.count(DocSet.id))
+            .join(DocSet, DocSet.job_id == Job.id)
+            .where(Job.maker_id.in_(maker_ids), Job.submitted_date == day)
+            .group_by(Job.maker_id)
+        )).all()
+        for maker_id, count in today_counts:
+            if maker_id in stats:
+                stats[maker_id]["resumes_today"] = int(count or 0)
+        interview_counts = (await session.execute(
+            select(Job.maker_id, func.count(Interview.id))
+            .join(DocSet, DocSet.job_id == Job.id)
+            .join(Interview, Interview.doc_set_id == DocSet.id)
+            .where(Job.maker_id.in_(maker_ids))
+            .group_by(Job.maker_id)
+        )).all()
+        for maker_id, count in interview_counts:
+            if maker_id in stats:
+                stats[maker_id]["interviews"] = int(count or 0)
+        for entry in (value for key, value in stats.items() if key in maker_ids):
+            total = entry["total_resumes"]
+            entry["interview_pct"] = round(entry["interviews"] * 100 / total, 1) if total else 0.0
+
+    if reviewer_ids:
+        totals = (await session.execute(
+            select(Interview.reviewer_id, func.count(Interview.id))
+            .where(Interview.reviewer_id.in_(reviewer_ids))
+            .group_by(Interview.reviewer_id)
+        )).all()
+        for reviewer_id, count in totals:
+            if reviewer_id in stats:
+                stats[reviewer_id]["total_interviews"] = int(count or 0)
+        by_step = (await session.execute(
+            select(
+                InterviewStepRecord.reviewer_id,
+                InterviewStep.name,
+                InterviewStep.color,
+                func.count(InterviewStepRecord.id),
+            )
+            .join(InterviewStep, InterviewStep.id == InterviewStepRecord.step_id)
+            .where(InterviewStepRecord.reviewer_id.in_(reviewer_ids))
+            .group_by(InterviewStepRecord.reviewer_id, InterviewStep.name, InterviewStep.color, InterviewStep.position)
+            .order_by(InterviewStep.position)
+        )).all()
+        for reviewer_id, name, color, count in by_step:
+            if reviewer_id in stats:
+                stats[reviewer_id]["by_step"].append({"name": name, "color": color, "count": int(count or 0)})
+        done_today = (await session.execute(
+            select(InterviewStepRecord.reviewer_id, func.count(InterviewStepRecord.id))
+            .where(
+                InterviewStepRecord.reviewer_id.in_(reviewer_ids),
+                InterviewStepRecord.done.is_(True),
+                InterviewStepRecord.done_at >= await _day_start(session, day),
+            )
+            .group_by(InterviewStepRecord.reviewer_id)
+        )).all()
+        for reviewer_id, count in done_today:
+            if reviewer_id in stats:
+                stats[reviewer_id]["reviews_today"] = int(count or 0)
+    return stats
 
 
 @router.get("")
@@ -48,10 +160,12 @@ async def list_users(
         query = query.where(or_(User.name.ilike(f"%{q}%"), User.email.ilike(f"%{q}%")))
     users = (await session.execute(query.order_by(User.name))).scalars().all()
     day = await intake.server_today(session)
+    stats = await _bulk_stats(session, list(users), day)
     items = []
     for user in users:
         payload = user_out(user)
         payload["sessions"] = await session_service.active_session_count(session, user.id)
+        payload["stats"] = stats.get(user.id)
         if user.role == "maker":
             assignment = await intake.active_assignment(session, user.id)
             profile = await session.get(Profile, assignment.profile_id) if assignment else None
@@ -86,6 +200,7 @@ async def create_user(
         password_hash=hash_password(password),
         must_change_password=payload.must_change_password,
         daily_limit=daily_limit if payload.role == "maker" else None,
+        info=(payload.info or "").strip() or None,
     )
     session.add(user)
     await session.flush()
@@ -161,9 +276,23 @@ async def update_user(
             user.daily_limit = None
     if data.get("is_active") is False:
         data["is_active"] = False
+    # USR-9: ``profile_id`` is a relationship, not a column — pull it out first.
+    profile_id = data.pop("profile_id", _MISSING)
     before = {"role": user.role, "is_active": user.is_active, "daily_limit": user.daily_limit}
     for key, value in data.items():
         setattr(user, key, value)
+    if profile_id is not _MISSING:
+        assignment = await intake.active_assignment(session, user.id)
+        if profile_id:
+            profile = await session.get(Profile, profile_id)
+            if profile is None:
+                raise APIError("invalid_profile", "Profile not found.", status_code=400)
+            if assignment is None or assignment.profile_id != profile.id:
+                if assignment is not None:
+                    assignment.ended_at = utcnow()
+                session.add(ProfileAssignment(profile_id=profile.id, maker_id=user.id, assigned_by=actor.id))
+        elif assignment is not None:
+            assignment.ended_at = utcnow()
     if data.get("is_active") is False:
         await session_service.revoke_all_sessions(session, user.id)
     session.add(

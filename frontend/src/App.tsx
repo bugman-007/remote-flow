@@ -4,6 +4,7 @@ import { AppShell } from "./layout/AppShell";
 import { LoginPage } from "./pages/LoginPage";
 import { ChangePasswordPage } from "./pages/ChangePasswordPage";
 import { JdUploadPage } from "./pages/JdUploadPage";
+import { MyProfilePage } from "./pages/MyProfilePage";
 import { ResumesPage } from "./pages/ResumesPage";
 import { InterviewsPage } from "./pages/InterviewsPage";
 import { ProfilesPage } from "./pages/ProfilesPage";
@@ -23,6 +24,7 @@ export function App() {
         }
       >
         <Route path="/jd-upload" element={<RequireAuth roles={["maker"]}><JdUploadPage /></RequireAuth>} />
+        <Route path="/my-profile" element={<RequireAuth roles={["maker"]}><MyProfilePage /></RequireAuth>} />
         <Route path="/resumes" element={<RequireAuth roles={["maker", "manager"]}><ResumesPage /></RequireAuth>} />
         <Route path="/interviews" element={<RequireAuth roles={["manager", "reviewer"]}><InterviewsPage /></RequireAuth>} />
         <Route path="/profiles" element={<RequireAuth roles={["manager"]}><ProfilesPage /></RequireAuth>} />

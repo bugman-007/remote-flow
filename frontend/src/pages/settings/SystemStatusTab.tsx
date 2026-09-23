@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { PauseCircle, PlayCircle } from "lucide-react";
 import { api, errorMessage } from "../../lib/api";
@@ -11,6 +12,7 @@ import type { SystemStatus } from "../../types";
 /** SET-14: the live system card. */
 export function SystemStatusTab() {
   const { push } = useToast();
+  const [busy, setBusy] = useState(false);
   const status = useQuery({
     queryKey: ["system-status"],
     queryFn: () => api.get<SystemStatus>("/system/status"),
@@ -29,11 +31,14 @@ export function SystemStatusTab() {
   const oldest = data.oldest_queued_at ? (Date.now() - new Date(data.oldest_queued_at).getTime()) / 1000 : null;
 
   const toggleIntake = async () => {
+    setBusy(true);
     try {
       await api.post(data.disk.intake_paused ? "/system/intake/resume" : "/system/intake/pause");
       await status.refetch();
     } catch (error) {
       push({ tone: "error", title: errorMessage(error) });
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -94,7 +99,7 @@ export function SystemStatusTab() {
               <PauseCircle className="h-3 w-3" /> {t("settings.status.intakePaused")}
             </Badge>
           ) : null}
-          <Button size="sm" variant="outline" onClick={() => void toggleIntake()}>
+          <Button size="sm" variant="outline" loading={busy} onClick={() => void toggleIntake()}>
             <PlayCircle className="h-3.5 w-3.5" />
             {data.disk.intake_paused ? t("settings.status.resumeIntake") : t("settings.status.pauseIntake")}
           </Button>

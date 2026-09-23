@@ -11,9 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.deps import client_ip, csrf_protect, current_user, maker_required, manager_required
 from app.errors import APIError
-from app.models import AuditLog, DocSet, Generation, GenerationAttempt, Job, User
+from app.models import AuditLog, DocSet, Generation, GenerationAttempt, Job, Profile, ProfileAssignment, User
 from app.schemas import RetryRequest, SubmitJobRequest
-from app.serializers import attempt_out, generation_out, job_out
+from app.serializers import attempt_out, generation_out, job_out, profile_out
 from app.services import dispatch, events, intake, pipeline, release, settings_store
 from app.services.derived import derived_status
 from app.services.search import job_text_search_clause
@@ -265,13 +265,35 @@ async def skip_job(
 async def my_limit(user: User = Depends(maker_required), session: AsyncSession = Depends(get_session)):
     day = await intake.server_today(session)
     used = await intake.usage_today(session, user.id, day)
+    settings = await settings_store.all_settings(session)
     return {
         "daily_limit": user.daily_limit,
         "used": used,
         "remaining": None if user.daily_limit is None else max(user.daily_limit - used, 0),
         "date": day,
         "paused": (await settings_store.intake_paused(session))[0],
+        "min_jd_chars": int(settings["min_jd_chars"]),
+        "max_jd_chars": int(settings["max_jd_chars"]),
     }
+
+
+@router.get("/me/profile")
+async def my_profile(user: User = Depends(maker_required), session: AsyncSession = Depends(get_session)):
+    """PRO-2: the Maker sees the Shared fields of the Profile assigned to them."""
+    assignment = (
+        await session.execute(
+            select(ProfileAssignment)
+            .where(ProfileAssignment.maker_id == user.id, ProfileAssignment.ended_at.is_(None))
+            .order_by(ProfileAssignment.started_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if assignment is None:
+        return {"profile": None, "assigned_at": None}
+    profile = await session.get(Profile, assignment.profile_id)
+    if profile is None or profile.status != "active":
+        return {"profile": None, "assigned_at": None}
+    return {"profile": profile_out(profile, shared_only=True), "assigned_at": assignment.started_at}
 
 
 @router.get("/me/eta")

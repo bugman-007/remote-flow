@@ -31,6 +31,7 @@ def user_out(user: User) -> dict:
         "is_active": user.is_active,
         "must_change_password": user.must_change_password,
         "daily_limit": user.daily_limit,
+        "info": user.info,
         "last_login_at": user.last_login_at,
         "created_at": user.created_at,
     }
@@ -97,9 +98,7 @@ def profile_out(
         out: dict[str, Any] = {"id": profile.id}
         out["name"] = profile.name if "Name" in allowed else None
         out["url"] = profile.url if "URL" in allowed else None
-        out["description"] = profile.description if "Description" in allowed else None
-        out["start_date"] = profile.start_date if "Start date" in allowed else None
-        out["end_date"] = profile.end_date if "End date" in allowed else None
+        out["description"] = profile.description if {"Information", "Description"} & allowed else None
         out["tags"] = profile.tags if "Tags" in allowed else None
         custom = {
             key: value
@@ -251,6 +250,9 @@ def interview_out(
     files: list[dict] | None = None,
     profile: dict | None = None,
     pinned_generation_no: int | None = None,
+    status_label: dict | None = None,
+    steps: list[dict] | None = None,
+    attachments: list[dict] | None = None,
 ) -> dict:
     newer = bool(
         doc_set is not None
@@ -271,6 +273,14 @@ def interview_out(
         "meeting_at": interview.meeting_at,
         "meeting_tz": interview.meeting_tz,
         "status": interview.status,
+        "status_id": interview.status_id,
+        "status_label": status_label,
+        "tech_stack": interview.tech_stack,
+        "company_name": interview.company_name,
+        "job_title": interview.job_title,
+        "candidate_name": interview.candidate_name,
+        "steps": steps or [],
+        "attachments": attachments or [],
         "created_by": interview.created_by,
         "cancelled_at": interview.cancelled_at,
         "seen_by_reviewer_at": interview.seen_by_reviewer_at,

@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Eye, Plus } from "lucide-react";
+import { Eye, FileUp, Plus } from "lucide-react";
 import { api, errorMessage } from "../../lib/api";
 import { Badge, Button, Card, EmptyState, ErrorNote, Field, Input, Select, Spinner, Textarea } from "../../ui/primitives";
 import { Dialog } from "../../ui/dialog";
@@ -177,6 +177,11 @@ function ThemeDialog({
   const [assigned, setAssigned] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importSource, setImportSource] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
 
   const profiles = useQuery({
     queryKey: ["profiles"],
@@ -190,8 +195,69 @@ function ThemeDialog({
     setDescription(theme?.description ?? "");
     setParams({ ...defaults, ...(theme?.params ?? {}) });
     setAssigned((theme?.profiles ?? []).map((profile) => profile.id));
+    setImportSource(null);
     setError(null);
   }, [open, theme, defaults]);
+
+  // SET-10: render the unsaved params so the Manager sees the result while editing.
+  const livePreview = async () => {
+    setError(null);
+    setPreviewBusy(true);
+    try {
+      const blob = await api.requestBlob("/themes/preview", { method: "POST", body: { params } });
+      const url = URL.createObjectURL(blob);
+      setPreviewUrl((current) => {
+        if (current) URL.revokeObjectURL(current);
+        return url;
+      });
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setPreviewBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (open) return;
+    setPreviewUrl((current) => {
+      if (current) URL.revokeObjectURL(current);
+      return null;
+    });
+  }, [open]);
+
+  // SET-11: read an existing resume and pre-fill the form so the Manager can tweak it.
+  const importResume = async (file: File) => {
+    setError(null);
+    setImportBusy(true);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const result = await api.post<{
+        name: string;
+        description: string;
+        params: ThemeParams;
+        source: { font: string | null; size: number; accent: string };
+        warnings: string[];
+      }>("/themes/import-resume", body);
+      setName(result.name);
+      setDescription(result.description);
+      setParams({ ...defaults, ...result.params });
+      setImportSource(
+        t("settings.themes.importSource", {
+          font: result.source.font ?? "—",
+          size: result.source.size,
+          accent: result.source.accent,
+        }),
+      );
+      push({ tone: "success", title: t("settings.themes.importDone", { name: file.name }) });
+      if (result.warnings.length) setError(result.warnings.join(" "));
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setImportBusy(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
 
   const save = async () => {
     setBusy(true);
@@ -226,8 +292,8 @@ function ThemeDialog({
           <Button variant="outline" onClick={onClose} disabled={busy}>
             {t("common.cancel")}
           </Button>
-          <Button onClick={() => void save()} disabled={busy || !name}>
-            {busy ? t("common.saving") : t("common.save")}
+          <Button onClick={() => void save()} loading={busy} disabled={!name}>
+            {t("common.save")}
           </Button>
         </>
       }
@@ -273,6 +339,30 @@ function ThemeDialog({
             )}
           </Field>
         ))}
+        <Field label={t("settings.themes.importResume")} hint={t("settings.themes.importHint")} className="tablet:col-span-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".docx"
+              className="text-xs"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) void importResume(file);
+              }}
+            />
+            {importBusy ? (
+              <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Spinner /> {t("settings.themes.importRunning")}
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                <FileUp className="h-3.5 w-3.5" /> .docx
+              </span>
+            )}
+          </div>
+          {importSource ? <p className="mt-1 text-xs text-muted-foreground">{importSource}</p> : null}
+        </Field>
         <Field label={t("settings.themes.assign")} className="tablet:col-span-2">
           <div className="flex flex-wrap gap-3">
             {(profiles.data?.items ?? []).map((profile) => (
@@ -291,6 +381,21 @@ function ThemeDialog({
           </div>
         </Field>
       </div>
+      <div className="mt-3">
+        <Button size="sm" variant="outline" onClick={() => void livePreview()} loading={previewBusy}>
+          <Eye className="h-3.5 w-3.5" />
+          {t("settings.themes.livePreview")}
+        </Button>
+      </div>
+      {previewUrl ? (
+        <div className="mt-3">
+          <iframe
+            title={t("settings.themes.livePreview")}
+            src={previewUrl}
+            className="h-[45vh] w-full rounded border border-border"
+          />
+        </div>
+      ) : null}
       {error ? (
         <div className="mt-3">
           <ErrorNote>{error}</ErrorNote>

@@ -17,6 +17,8 @@ interface LimitInfo {
   remaining: number | null;
   date: string;
   paused: boolean;
+  min_jd_chars: number;
+  max_jd_chars: number;
 }
 
 interface EtaInfo {
@@ -28,8 +30,9 @@ interface EtaInfo {
   estimate: boolean;
 }
 
-const MIN_CHARS = 50;
-const MAX_CHARS = 20_000;
+/** JD-1: fall back to the server defaults until ``/me/limit`` answers. */
+const FALLBACK_MIN_CHARS = 50;
+const FALLBACK_MAX_CHARS = 200_000;
 
 export function JdUploadPage() {
   const { user } = useAuth();
@@ -62,6 +65,8 @@ export function JdUploadPage() {
     refetchInterval: 60_000,
   });
 
+  const minChars = limit.data?.min_jd_chars ?? FALLBACK_MIN_CHARS;
+  const maxChars = limit.data?.max_jd_chars ?? FALLBACK_MAX_CHARS;
   const limitReached =
     limit.data?.daily_limit !== null && limit.data !== undefined && limit.data.used >= (limit.data.daily_limit ?? 0);
   const paused = Boolean(limit.data?.paused) || blockedReason === "paused";
@@ -77,27 +82,27 @@ export function JdUploadPage() {
   const trimmed = text.trim();
   const charState = useMemo(() => {
     if (!trimmed) return "empty" as const;
-    if (trimmed.length < MIN_CHARS) return "short" as const;
-    if (trimmed.length > MAX_CHARS) return "long" as const;
+    if (trimmed.length < minChars) return "short" as const;
+    if (trimmed.length > maxChars) return "long" as const;
     return "ok" as const;
-  }, [trimmed]);
+  }, [trimmed, minChars, maxChars]);
 
   const bulkParts = useMemo(() => {
     if (!text.includes("-----")) return [];
     return text
       .split(/^\s*-{5,}\s*$/m)
       .map((part) => part.trim())
-      .filter((part) => part.length >= MIN_CHARS);
-  }, [text]);
+      .filter((part) => part.length >= minChars);
+  }, [text, minChars]);
 
   const submit = async (body?: string) => {
     const payloadText = (body ?? text).trim();
-    if (payloadText.length < MIN_CHARS) {
-      setError(t("jd.tooShort", { min: MIN_CHARS }));
+    if (payloadText.length < minChars) {
+      setError(t("jd.tooShort", { min: minChars }));
       return;
     }
-    if (payloadText.length > MAX_CHARS) {
-      setError(t("jd.tooLong", { max: MAX_CHARS.toLocaleString() }));
+    if (payloadText.length > maxChars) {
+      setError(t("jd.tooLong", { max: maxChars.toLocaleString() }));
       return;
     }
     if (pendingKey.current && pendingKey.current.text !== payloadText) pendingKey.current = null;
@@ -191,14 +196,14 @@ export function JdUploadPage() {
         />
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
           <span className="text-xs text-muted-foreground">
-            {t("jd.characters", { count: trimmed.length, max: MAX_CHARS.toLocaleString() })}
-            {charState === "short" ? ` · ${t("jd.tooShort", { min: MIN_CHARS })}` : ""}
-            {charState === "long" ? ` · ${t("jd.tooLong", { max: MAX_CHARS.toLocaleString() })}` : ""}
+            {t("jd.characters", { count: trimmed.length, max: maxChars.toLocaleString() })}
+            {charState === "short" ? ` · ${t("jd.tooShort", { min: minChars })}` : ""}
+            {charState === "long" ? ` · ${t("jd.tooLong", { max: maxChars.toLocaleString() })}` : ""}
           </span>
           <div className="flex items-center gap-2">
             {lastSeq !== null ? <Badge tone="info">{t("jd.submitted", { seq: formatSeq(lastSeq) })}</Badge> : null}
-            <Button disabled={disabled || charState !== "ok"} onClick={() => void submit()}>
-              {busy ? <Spinner className="h-3.5 w-3.5" /> : <Send className="h-4 w-4" />}
+            <Button loading={busy} disabled={disabled || charState !== "ok"} onClick={() => void submit()}>
+              <Send className="h-4 w-4" />
               {busy ? t("jd.submitting") : t("jd.submit")}
             </Button>
           </div>

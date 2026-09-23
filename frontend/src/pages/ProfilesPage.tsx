@@ -1,17 +1,17 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, Plus, Save, UserPlus } from "lucide-react";
-import { api, errorMessage } from "../lib/api";
+import { Archive, FileDown, Plus, Save, UserPlus } from "lucide-react";
+import { api, downloadBlob, errorMessage } from "../lib/api";
 import { t } from "../i18n";
 import { Badge, Button, Card, CardHeader, Checkbox, EmptyState, ErrorNote, Field, Input, Select, Spinner, Textarea } from "../ui/primitives";
 import { Dialog, Drawer } from "../ui/dialog";
 import { Table } from "../ui/table";
 import { useToast } from "../ui/toast";
 import { formatDate, formatDateTime } from "../lib/format";
-import { parseList } from "../lib/utils";
+import { downloadText, parseList } from "../lib/utils";
 import type { Paginated, Profile, PromptVersion, Theme, User } from "../types";
 
-const SHAREABLE = ["Name", "URL", "Description", "Start date", "End date", "Tags"];
+const SHAREABLE = ["Name", "URL", "Information", "Tags"];
 
 export function ProfilesPage() {
   const { push } = useToast();
@@ -96,9 +96,12 @@ export function ProfilesPage() {
           setCreating(false);
           setOpenId(null);
         }}
-        onSaved={() => {
+        onSaved={(savedId) => {
           refresh();
           setCreating(false);
+          // Keep the drawer on the profile that was just created so the Prompt
+          // tab (and its version list) keeps working without reopening it.
+          if (savedId) setOpenId(savedId);
         }}
         push={push}
       />
@@ -116,13 +119,22 @@ function ProfileDialog({
   open: boolean;
   profileId: string | null;
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (savedId?: string) => void;
   push: ReturnType<typeof useToast>["push"];
 }) {
   const [tab, setTab] = useState<"details" | "prompt" | "makers" | "share">("details");
   const [draft, setDraft] = useState<Profile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // PRO-4: a "New profile" has no id until it is saved; keep the one we create so
+  // the Prompt tab can save a version in the same visit.
+  const queryClient = useQueryClient();
+  const [createdId, setCreatedId] = useState<string | null>(null);
+  const [promptBody, setPromptBody] = useState("");
+  const [promptNote, setPromptNote] = useState("");
+  //: The body that is currently stored on the server, so Save only writes when it changed.
+  const [savedPrompt, setSavedPrompt] = useState("");
+  const id = profileId ?? createdId;
 
   const profile = useQuery({
     queryKey: ["profile", profileId],
@@ -143,7 +155,10 @@ function ProfileDialog({
   });
 
   useEffect(() => {
-    if (profile.data) setDraft(profile.data);
+    if (!profile.data) return;
+    setDraft(profile.data);
+    setPromptBody(profile.data.active_prompt?.body ?? "");
+    setSavedPrompt(profile.data.active_prompt?.body ?? "");
   }, [profile.data]);
 
   useEffect(() => {
@@ -172,9 +187,18 @@ function ProfileDialog({
         updated_at: "",
       });
       setTab("details");
+      setCreatedId(null);
+      setPromptBody("");
+      setSavedPrompt("");
+      setPromptNote("");
     }
   }, [open, profileId]);
 
+  /**
+   * PRO-4: one Save button. It always persists the profile, and on the Prompt tab
+   * it also saves the prompt version — for a brand-new profile that means creating
+   * the profile first, then attaching the prompt to it.
+   */
   const save = async () => {
     if (!draft) return;
     setBusy(true);
@@ -195,15 +219,37 @@ function ProfileDialog({
         custom_fields: draft.custom_fields,
         shared_fields: draft.shared_fields,
       };
-      if (profileId) await api.patch(`/profiles/${profileId}`, payload);
-      else await api.post("/profiles", payload);
+      let savedId = id;
+      if (savedId) {
+        await api.patch(`/profiles/${savedId}`, payload);
+      } else {
+        const created = await api.post<Profile>("/profiles", payload);
+        savedId = created.id;
+        setCreatedId(created.id);
+      }
+      await savePromptVersion(savedId);
       push({ tone: "success", title: t("toast.saved") });
-      onSaved();
+      onSaved(savedId ?? undefined);
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
       setBusy(false);
     }
+  };
+
+  /** Persist the prompt editor as a new version (only when it actually changed). */
+  const savePromptVersion = async (targetId: string | null = id) => {
+    if (tab !== "prompt" || !targetId) return;
+    const trimmed = promptBody.trim();
+    if (!trimmed || trimmed === savedPrompt.trim()) return;
+    await api.post(`/profiles/${targetId}/prompt-versions`, {
+      body: promptBody,
+      change_note: promptNote || undefined,
+    });
+    setSavedPrompt(promptBody);
+    setPromptNote("");
+    await queryClient.invalidateQueries({ queryKey: ["prompt-versions", targetId] });
+    await queryClient.invalidateQueries({ queryKey: ["profile", targetId] });
   };
 
   return (
@@ -223,7 +269,7 @@ function ProfileDialog({
             {(["details", "prompt", "makers", "share"] as const).map((value) => (
               <Button key={value} size="sm" variant={tab === value ? "primary" : "outline"} onClick={() => setTab(value)}>
                 {value === "details"
-                  ? t("common.description")
+                  ? t("profiles.information")
                   : value === "prompt"
                     ? t("profiles.prompt")
                     : value === "makers"
@@ -232,13 +278,13 @@ function ProfileDialog({
               </Button>
             ))}
             <span className="ml-auto flex items-center gap-2">
-              {profileId ? (
+              {id ? (
                 <Button
                   size="sm"
                   variant="outline"
                   onClick={async () => {
                     try {
-                      await api.post(`/profiles/${profileId}/archive`);
+                      await api.post(`/profiles/${id}/archive`);
                       push({ tone: "success", title: t("toast.updated") });
                       onSaved();
                     } catch (caught) {
@@ -250,9 +296,9 @@ function ProfileDialog({
                   {draft.status === "archived" ? t("profiles.unarchive") : t("profiles.archive")}
                 </Button>
               ) : null}
-              <Button size="sm" onClick={() => void save()} disabled={busy}>
+              <Button size="sm" onClick={() => void save()} loading={busy}>
                 <Save className="h-3.5 w-3.5" />
-                {busy ? t("common.saving") : t("common.save")}
+                {t("common.save")}
               </Button>
             </span>
           </div>
@@ -267,14 +313,8 @@ function ProfileDialog({
               <Field label={t("profiles.url")}>
                 <Input value={draft.url ?? ""} onChange={(event) => setDraft({ ...draft, url: event.target.value })} />
               </Field>
-              <Field label={t("common.description")} className="tablet:col-span-2">
+              <Field label={t("profiles.information")} className="tablet:col-span-2">
                 <Textarea value={draft.description ?? ""} onChange={(event) => setDraft({ ...draft, description: event.target.value })} />
-              </Field>
-              <Field label={t("profiles.startDate")}>
-                <Input type="date" value={draft.start_date ?? ""} onChange={(event) => setDraft({ ...draft, start_date: event.target.value })} />
-              </Field>
-              <Field label={t("profiles.endDate")}>
-                <Input type="date" value={draft.end_date ?? ""} onChange={(event) => setDraft({ ...draft, end_date: event.target.value })} />
               </Field>
               <Field label={t("profiles.theme")}>
                 <Select value={draft.theme_id ?? ""} onChange={(event) => setDraft({ ...draft, theme_id: event.target.value || null })}>
@@ -352,8 +392,19 @@ function ProfileDialog({
             </div>
           ) : null}
 
-          {tab === "prompt" ? <PromptTab profileId={profileId} draft={draft} push={push} /> : null}
-          {tab === "makers" ? <MakersTab profileId={profileId} push={push} /> : null}
+          {tab === "prompt" ? (
+            <PromptTab
+              profileId={id}
+              body={promptBody}
+              onBody={setPromptBody}
+              note={promptNote}
+              onNote={setPromptNote}
+              onSaveVersion={() => savePromptVersion()}
+              saving={busy}
+              push={push}
+            />
+          ) : null}
+          {tab === "makers" ? <MakersTab profileId={id} push={push} /> : null}
 
           {tab === "share" ? (
             <div className="space-y-2">
@@ -398,20 +449,29 @@ function ProfileDialog({
 
 function PromptTab({
   profileId,
-  draft,
+  body,
+  onBody,
+  note,
+  onNote,
+  onSaveVersion,
+  saving,
   push,
 }: {
   profileId: string | null;
-  draft: Profile;
+  body: string;
+  onBody: (value: string) => void;
+  note: string;
+  onNote: (value: string) => void;
+  onSaveVersion: () => Promise<void>;
+  saving: boolean;
   push: ReturnType<typeof useToast>["push"];
 }) {
   const queryClient = useQueryClient();
-  const [body, setBody] = useState(draft.active_prompt?.body ?? "");
-  const [note, setNote] = useState("");
   const [testJd, setTestJd] = useState("");
   const [testResult, setTestResult] = useState<{ json: unknown; call_log: unknown; candidate_name: string } | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
   const [openDiff, setOpenDiff] = useState<string | null>(null);
+  const [testing, setTesting] = useState(false);
 
   const versions = useQuery({
     queryKey: ["prompt-versions", profileId],
@@ -419,30 +479,55 @@ function PromptTab({
     enabled: Boolean(profileId),
   });
 
+  // The drawer's Save button owns the write; this keeps the tab's own button in sync.
   const saveVersion = async () => {
     if (!profileId) return;
     try {
-      await api.post(`/profiles/${profileId}/prompt-versions`, { body, change_note: note });
-      setNote("");
+      await onSaveVersion();
       push({ tone: "success", title: t("toast.saved") });
-      await queryClient.invalidateQueries({ queryKey: ["prompt-versions", profileId] });
-      await queryClient.invalidateQueries({ queryKey: ["profile", profileId] });
     } catch (error) {
       push({ tone: "error", title: errorMessage(error) });
     }
   };
 
   const runTest = async () => {
-    if (!profileId) return;
+    if (!profileId || testing) return;
     setTestError(null);
+    setTesting(true);
     try {
       const result = await api.post<{ json: unknown; call_log: unknown; candidate_name: string }>(`/profiles/${profileId}/test`, {
         jd_text: testJd,
+        prompt_body: body,
       });
       setTestResult(result);
     } catch (error) {
       setTestResult(null);
       setTestError(errorMessage(error));
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  // PRO-9: the test result can be inspected as JSON or downloaded as a rendered PDF/DOCX pair.
+  const downloadTestJson = () => {
+    if (!testResult) return;
+    downloadText(`prompt-test-${(profileId ?? "profile").slice(0, 8)}.json`, JSON.stringify(testResult.json, null, 2));
+  };
+
+  const downloadTestPdf = async () => {
+    if (!profileId || testing) return;
+    setTesting(true);
+    setTestError(null);
+    try {
+      const blob = await api.requestBlob(`/profiles/${profileId}/test/pdf`, {
+        method: "POST",
+        body: { jd_text: testJd, prompt_body: body },
+      });
+      await downloadBlob(blob, `prompt-test-${profileId.slice(0, 8)}.pdf`);
+    } catch (error) {
+      setTestError(errorMessage(error));
+    } finally {
+      setTesting(false);
     }
   };
 
@@ -452,14 +537,14 @@ function PromptTab({
         <Textarea
           className="min-h-[240px] font-mono text-xs"
           value={body}
-          onChange={(event) => setBody(event.target.value)}
+          onChange={(event) => onBody(event.target.value)}
         />
       </Field>
       <div className="flex flex-wrap items-end gap-2">
         <Field className="mb-0 flex-1" label={t("profiles.changeNote")}>
-          <Input value={note} onChange={(event) => setNote(event.target.value)} />
+          <Input value={note} onChange={(event) => onNote(event.target.value)} />
         </Field>
-        <Button onClick={() => void saveVersion()} disabled={!profileId}>
+        <Button onClick={() => void saveVersion()} loading={saving} disabled={!profileId}>
           {t("profiles.saveVersion")}
         </Button>
       </div>
@@ -531,9 +616,27 @@ function PromptTab({
         <Field label={t("profiles.testJd")}>
           <Textarea value={testJd} onChange={(event) => setTestJd(event.target.value)} />
         </Field>
-        <Button size="sm" onClick={() => void runTest()} disabled={!profileId || testJd.trim().length < 50}>
-          {t("profiles.runTest")}
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" onClick={() => void runTest()} loading={testing} disabled={!profileId || testJd.trim().length < 50}>
+            {t("profiles.runTest")}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void downloadTestPdf()}
+            loading={testing}
+            disabled={!profileId || testJd.trim().length < 50}
+          >
+            <FileDown className="h-3.5 w-3.5" />
+            {t("profiles.runTestPdf")}
+          </Button>
+          {testResult ? (
+            <Button size="sm" variant="outline" onClick={downloadTestJson}>
+              <FileDown className="h-3.5 w-3.5" />
+              {t("profiles.downloadJson")}
+            </Button>
+          ) : null}
+        </div>
         {testError ? (
           <div className="mt-2">
             <ErrorNote>{testError}</ErrorNote>
@@ -551,7 +654,6 @@ function PromptTab({
       </Card>
 
       <p className="text-xs text-muted-foreground">{t("profiles.snapshotNote")}</p>
-      <span className="hidden">{draft.id}</span>
     </div>
   );
 }

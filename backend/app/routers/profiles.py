@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,9 +24,16 @@ from app.models import (
 )
 from app.schemas import AssignmentRequest, ProfileRequest, ProfileUpdate, PromptVersionRequest, TestPromptRequest
 from app.serializers import profile_out, prompt_version_out
-from app.services import events, intake, snapshots
+from app.services import events, intake, render, snapshots, storage
 from app.services.derived import doc_set_summary
-from app.services.llm import LLMError, build_system_prompt, make_client, provider_config_from_row, generate_resume
+from app.services.llm import (
+    LLMError,
+    build_system_prompt,
+    generate_resume,
+    inject_job_description,
+    make_client,
+    provider_config_from_row,
+)
 from app.utils import utcnow
 
 router = APIRouter(prefix="/profiles", tags=["profiles"], dependencies=[Depends(csrf_protect)])
@@ -320,8 +327,9 @@ async def test_prompt(
         temperature=snapshot["llm_params"].get("temperature"),
         max_tokens=snapshot["llm_params"].get("max_tokens"),
     )
-    prompt = ""
-    if profile.active_prompt_version_id:
+    # LLM-5: test the text in the editor when supplied, otherwise the saved version.
+    prompt = payload.prompt_body or ""
+    if not prompt and profile.active_prompt_version_id:
         version = await session.get(PromptVersion, profile.active_prompt_version_id)
         prompt = version.body if version else ""
     try:
@@ -330,10 +338,63 @@ async def test_prompt(
         )
     except LLMError as exc:
         raise APIError("llm_test_failed", exc.message, status_code=502, details={"code": exc.code}) from exc
+    data = inject_job_description(data, payload.jd_text)
     from vendor.resume_builder import core
 
     name, basename = core.make_names(data)
     return {"json": data, "raw": raw, "call_log": log, "candidate_name": name, "docx_basename": basename}
+
+
+@router.post("/{profile_id}/test/pdf")
+async def test_prompt_pdf(
+    profile_id: str,
+    payload: TestPromptRequest,
+    _: User = Depends(manager_required),
+    session: AsyncSession = Depends(get_session),
+):
+    """LLM-5: same test run, but rendered to PDF with the profile's theme."""
+    profile = await _load(session, profile_id)
+    snapshot = await snapshots.resolve_profile_snapshot(session, profile)
+    provider = await session.get(LLMProvider, snapshot["provider_id"])
+    if provider is None:
+        raise APIError("no_provider_configured", "No provider is configured for this profile.", status_code=409)
+    config = provider_config_from_row(
+        provider,
+        model=snapshot["model"],
+        temperature=snapshot["llm_params"].get("temperature"),
+        max_tokens=snapshot["llm_params"].get("max_tokens"),
+    )
+    prompt = payload.prompt_body or ""
+    if not prompt and profile.active_prompt_version_id:
+        version = await session.get(PromptVersion, profile.active_prompt_version_id)
+        prompt = version.body if version else ""
+    try:
+        data, _raw, _log = await generate_resume(
+            make_client(config), provider=config, profile_prompt=prompt, jd_text=payload.jd_text
+        )
+        data = inject_job_description(data, payload.jd_text)
+        output = render.render_generation(
+            llm_json=data,
+            theme_snapshot=snapshot["theme_snapshot"],
+            doc_set_path=storage.tmp_dir(),
+            generation_no=0,
+        )
+    except LLMError as exc:
+        raise APIError("llm_test_failed", exc.message, status_code=502, details={"code": exc.code}) from exc
+    except render.RenderError as exc:
+        raise APIError("render_failed", exc.message, status_code=502, details={"code": exc.code}) from exc
+    try:
+        pdf = next((item for item in output.files if item.kind == "pdf"), None)
+        if pdf is None:
+            raise APIError("render_failed", "The PDF was not produced.", status_code=502)
+        content = pdf.path.read_bytes()
+    finally:
+        render.discard(output)
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="prompt-test-{profile.id[:8]}.pdf"'},
+    )
 
 
 @router.get("/{profile_id}/assignments")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import re
 import zipfile
 from datetime import date, timedelta
 
@@ -120,7 +121,12 @@ async def test_submit_run_pipeline_and_download_the_zip(api, workspace):
     assert len(names) == 3
     assert any(name.endswith(".pdf") for name in names)
     assert any(name.endswith(".docx") for name in names)
-    assert {name.split("/")[0] for name in names} == {"001_Company_API_to_join_the_platform_team_Senior_Full_Stack_Developer"}
+    folders = {name.split("/")[0] for name in names}
+    assert len(folders) == 1, folders
+    folder = folders.pop()
+    # RES-13: date-time first so extracted folders sort like the submission order.
+    assert re.match(r"^\d{4}-\d{2}-\d{2}_\d{6}_", folder), folder
+    assert folder.endswith("Company_API_to_join_the_platform_team_Senior_Full_Stack_Developer")
 
     # Individual file download is authorised for the owning maker.
     pdf = next(f for f in row["files"] if f["kind"] == "pdf")
@@ -730,3 +736,651 @@ async def test_doc_set_access_and_downloads_are_audited(api, workspace, db_sessi
     ).scalars().all()
     assert "file.download" in file_actions
     await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_maker_limit_exposes_jd_bounds(api, workspace):
+    """JD-3: the Maker UI reads the real bounds instead of a hardcoded cap."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    body = (await maker.get("/api/v1/me/limit")).json()
+    assert body["min_jd_chars"] == 50
+    assert body["max_jd_chars"] >= 200_000
+
+
+@pytest.mark.asyncio
+async def test_doc_sets_sort_by_submitted_time(api, workspace):
+    """RES-13: Makers can sort by submission time, not only by ready time."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    await submit_via_api(maker, "Sort check one: hiring a backend engineer at Company Sort One.", key="sort-1")
+    await submit_via_api(maker, "Sort check two: hiring a data engineer at Company Sort Two, remote.", key="sort-2")
+    await run_pipeline()
+
+    def seqs(payload):
+        return [row["seq_no"] for row in payload["items"]]
+
+    params = {"date": date.today().isoformat(), "sort": "submitted"}
+    newest = (await maker.get("/api/v1/doc-sets", params={**params, "order": "desc"})).json()
+    oldest = (await maker.get("/api/v1/doc-sets", params={**params, "order": "asc"})).json()
+    assert seqs(newest) == [2, 1]
+    assert seqs(oldest) == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_maker_new_filter_clears_after_download(api, workspace):
+    """RES-14: "New" lists never-downloaded sets and clears once the Maker takes them."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    await submit_via_api(maker, "New filter: hiring a platform engineer at Company Filter One.", key="new-1")
+    await run_pipeline()
+
+    day = {"date": date.today().isoformat()}
+    fresh = (await maker.get("/api/v1/doc-sets", params={**day, "status": "new"})).json()
+    assert len(fresh["items"]) == 1
+    row = fresh["items"][0]
+    assert row["downloaded_at"] is None
+
+    response = await maker.get(f"/api/v1/doc-sets/{row['doc_set_id']}/zip")
+    assert response.status_code == 200, response.text
+
+    after = (await maker.get("/api/v1/doc-sets", params={**day, "status": "new"})).json()
+    assert after["items"] == []
+    all_rows = (await maker.get("/api/v1/doc-sets", params=day)).json()["items"]
+    assert all_rows[0]["downloaded_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_date_zip_accepts_a_range(api, workspace):
+    """RES-1: "This week"/"This month" downloads span a date range, not a single day."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    await submit_via_api(maker, "Range zip: hiring a designer at Company Range One.", key="range-1")
+    await run_pipeline()
+
+    today = date.today().isoformat()
+    response = await maker.get("/api/v1/doc-sets/zip", params={"date_from": today, "date_to": today})
+    assert response.status_code == 200, response.text
+    assert response.headers["X-Zip-Included"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_reviewer_tabs_and_overview_counts(api, workspace, fresh_client):
+    """INT-4: reviewers get All/Upcoming/Done tabs plus an overview count block."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    await submit_via_api(maker, "Interview tabs: hiring a QA engineer at Company Tabs One.", key="tabs-1")
+    await run_pipeline()
+    row = (await maker.get("/api/v1/doc-sets", params={"date": date.today().isoformat()})).json()["items"][0]
+
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    created = await manager.post(
+        "/api/v1/interviews",
+        json={
+            "doc_set_id": row["doc_set_id"],
+            "reviewer_id": str(workspace["reviewer"].id),
+            "meeting_at": utcnow().isoformat(),
+            "values": {"meeting_end_time": "11:30"},
+        },
+    )
+    assert created.status_code == 201, created.text
+    interview_id = created.json()["id"]
+
+    reviewer = await fresh_client("reviewer@example.com", workspace["password"])
+    todo = (await reviewer.get("/api/v1/interviews", params={"tab": "todo"})).json()
+    assert [item["id"] for item in todo["items"]] == [interview_id]
+    assert todo["counts"] == {"total": 1, "todo": 1, "done": 0}
+    assert todo["items"][0]["values"]["meeting_end_time"] == "11:30"
+
+    assert (await reviewer.get("/api/v1/interviews", params={"tab": "done"})).json()["items"] == []
+
+    feedback = await reviewer.post(
+        f"/api/v1/interviews/{interview_id}/feedback",
+        json={"outcome": "pass", "rating": 4, "notes": "Solid candidate."},
+    )
+    assert feedback.status_code == 200, feedback.text
+
+    done = (await reviewer.get("/api/v1/interviews", params={"tab": "done"})).json()
+    assert [item["id"] for item in done["items"]] == [interview_id]
+    assert done["counts"] == {"total": 1, "todo": 0, "done": 1}
+    assert (await reviewer.get("/api/v1/interviews", params={"tab": "all"})).json()["counts"]["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_interview_date_range_filter(api, workspace, fresh_client):
+    """INT-4: the table's date filter spans a from/to window."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    await submit_via_api(maker, "Interview date filter: hiring a PM at Company Dates One.", key="dates-1")
+    await run_pipeline()
+    row = (await maker.get("/api/v1/doc-sets", params={"date": date.today().isoformat()})).json()["items"][0]
+
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    created = await manager.post(
+        "/api/v1/interviews",
+        json={
+            "doc_set_id": row["doc_set_id"],
+            "reviewer_id": str(workspace["reviewer"].id),
+            "meeting_at": "2030-01-15T10:00:00+00:00",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    reviewer = await fresh_client("reviewer@example.com", workspace["password"])
+    inside = await reviewer.get(
+        "/api/v1/interviews",
+        params={"tab": "all", "date_from": "2030-01-01T00:00:00", "date_to": "2030-01-31T23:59:59"},
+    )
+    outside = await reviewer.get(
+        "/api/v1/interviews",
+        params={"tab": "all", "date_from": "2031-01-01T00:00:00", "date_to": "2031-01-31T23:59:59"},
+    )
+    assert [item["id"] for item in inside.json()["items"]] == [created.json()["id"]]
+    assert outside.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_maker_sees_their_shared_profile(api, workspace):
+    """PRO-2: a Maker can read the shared fields of the assigned Profile and nothing else."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    body = (await maker.get("/api/v1/me/profile")).json()
+    assert body["profile"] is not None
+    assert body["profile"]["name"] == workspace["profile"].name
+    # Secrets/LLM configuration are never part of the shared payload.
+    assert "model" not in body["profile"]
+    assert "active_prompt" not in body["profile"]
+    assert "id" in body["profile"]
+
+    reviewer = await api.login("reviewer@example.com", workspace["password"])
+    assert (await reviewer.get("/api/v1/me/profile")).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_shared_profile_uses_the_information_field(api, workspace, fresh_client, db_session):
+    """PRO-2: sharing "Information" exposes the description (the renamed Description tab)."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    profile = workspace["profile"]
+    response = await manager.patch(
+        f"/api/v1/profiles/{profile.id}",
+        json={"description": "Senior backend engineer, remote.", "shared_fields": ["Name", "Information"]},
+    )
+    assert response.status_code == 200, response.text
+
+    maker = await api.login("maker@example.com", workspace["password"])
+    shared = (await maker.get("/api/v1/me/profile")).json()["profile"]
+    assert shared["description"] == "Senior backend engineer, remote."
+
+
+@pytest.mark.asyncio
+async def test_prompt_test_can_render_a_pdf(api, workspace, fresh_client):
+    """LLM-5: the Prompt tab's test run can come back as JSON or as a rendered PDF."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    profile_id = workspace["profile"].id
+
+    as_json = await manager.post(
+        f"/api/v1/profiles/{profile_id}/test",
+        json={"jd_text": "We are hiring a backend engineer to build APIs."},
+    )
+    assert as_json.status_code == 200, as_json.text
+    assert "json" in as_json.json()
+
+    as_pdf = await manager.post(
+        f"/api/v1/profiles/{profile_id}/test/pdf",
+        json={"jd_text": "We are hiring a backend engineer to build APIs."},
+    )
+    assert as_pdf.status_code == 200, as_pdf.text
+    assert as_pdf.headers["content-type"] == "application/pdf"
+    assert as_pdf.content.startswith(b"%PDF")
+    assert "attachment" in as_pdf.headers["content-disposition"]
+
+
+@pytest.mark.asyncio
+async def test_theme_preview_renders_unsaved_params(api, workspace, fresh_client):
+    """SET-10: the theme dialog previews edits before they are saved."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    response = await manager.post(
+        "/api/v1/themes/preview",
+        json={"params": {"font": "Inter", "size": 11, "accent": "#ff0000"}},
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.content.startswith(b"%PDF")
+
+    bad = await manager.post("/api/v1/themes/preview", json={"params": {"size": "huge"}})
+    assert bad.status_code == 422, bad.text
+
+
+async def _scheduled_interview(api, workspace, fresh_client, client_key: str = "p3-1"):
+    """Helper: submit, run and schedule one interview; returns (manager, row, interview)."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    await submit_via_api(maker, f"Phase three: hiring a staff engineer at Company {client_key}.", key=client_key)
+    await run_pipeline()
+    row = (await maker.get("/api/v1/doc-sets", params={"date": date.today().isoformat()})).json()["items"][0]
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    created = await manager.post(
+        "/api/v1/interviews",
+        json={
+            "doc_set_id": row["doc_set_id"],
+            "reviewer_id": str(workspace["reviewer"].id),
+            "meeting_at": "2030-05-01T09:00:00+00:00",
+            "tech_stack": "Python, Postgres",
+        },
+    )
+    assert created.status_code == 201, created.text
+    return manager, row, created.json()
+
+
+@pytest.mark.asyncio
+async def test_interview_taxonomy_crud(api, workspace, fresh_client):
+    """INT-14: managers own the ordered step and status lists."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    taxonomy = (await manager.get("/api/v1/interview-taxonomy")).json()
+    assert [step["name"] for step in taxonomy["steps"]][:4] == [
+        "Phone call",
+        "Initial meeting",
+        "Tech meeting",
+        "Final meeting",
+    ]
+    assert {row["name"] for row in taxonomy["statuses"]} >= {"Scheduled", "Rescheduled", "Done", "Cancelled", "Rejected"}
+
+    created = await manager.post("/api/v1/interview-steps", json={"name": "Take-home review", "color": "#123456"})
+    assert created.status_code == 201, created.text
+    step_id = created.json()["id"]
+    assert created.json()["position"] == 4
+
+    clash = await manager.post("/api/v1/interview-steps", json={"name": "Take-home review"})
+    assert clash.status_code == 409
+
+    renamed = await manager.patch(f"/api/v1/interview-steps/{step_id}", json={"name": "Take-home", "position": 0})
+    assert renamed.json()["name"] == "Take-home"
+    assert renamed.json()["position"] == 0
+
+    assert (await manager.delete(f"/api/v1/interview-steps/{step_id}")).status_code == 200
+    assert (await manager.get("/api/v1/interview-steps")).json()["items"][0]["name"] == "Phone call"
+
+    status = await manager.post("/api/v1/interview-statuses", json={"name": "Offer", "color": "#00ff00"})
+    assert status.status_code == 201
+    assert (await manager.delete(f"/api/v1/interview-statuses/{status.json()['id']}")).status_code == 200
+
+    maker = await fresh_client("maker@example.com", workspace["password"])
+    assert (await maker.get("/api/v1/interview-taxonomy")).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_interview_steps_done_and_rejected(api, workspace, fresh_client):
+    """INT-15: Done/Rejected checkboxes drive the status label and the history."""
+    manager, _row, interview = await _scheduled_interview(api, workspace, fresh_client, "p3-steps")
+    assert interview["status_label"]["name"] == "Scheduled"
+    assert len(interview["steps"]) == 1
+    first = interview["steps"][0]
+    assert first["step_name"] == "Phone call"
+    assert first["done"] is False
+
+    done = await manager.patch(
+        f"/api/v1/interviews/{interview['id']}/steps/{first['id']}", json={"done": True}
+    )
+    assert done.status_code == 200, done.text
+    assert done.json()["status_label"]["name"] == "Done"
+    assert done.json()["status"] == "completed"
+    assert done.json()["steps"][0]["done_at"] is not None
+
+    # Adding the next step automatically un-checks Done and returns to Scheduled.
+    steps = (await manager.get("/api/v1/interview-steps")).json()["items"]
+    tech = next(step for step in steps if step["name"] == "Tech meeting")
+    added = await manager.post(
+        f"/api/v1/interviews/{interview['id']}/steps",
+        json={"step_id": tech["id"], "reviewer_id": str(workspace["reviewer"].id)},
+    )
+    assert added.status_code == 201, added.text
+    body = added.json()
+    assert body["status_label"]["name"] == "Scheduled"
+    assert body["status"] == "scheduled"
+    assert [step["step_name"] for step in body["steps"]] == ["Phone call", "Tech meeting"]
+    # The earlier step keeps the record that it was handled.
+    assert body["steps"][0]["done"] is True
+
+    current = body["steps"][1]
+    rejected = await manager.patch(
+        f"/api/v1/interviews/{interview['id']}/steps/{current['id']}", json={"rejected": True}
+    )
+    assert rejected.json()["status_label"]["name"] == "Rejected"
+    assert rejected.json()["steps"][1]["rejected"] is True
+    assert rejected.json()["steps"][1]["done"] is False
+
+    cleared = await manager.patch(
+        f"/api/v1/interviews/{interview['id']}/steps/{current['id']}", json={"rejected": False}
+    )
+    assert cleared.json()["status_label"]["name"] == "Scheduled"
+
+
+@pytest.mark.asyncio
+async def test_interview_filter_bar(api, workspace, fresh_client):
+    """INT-14: Step x All/New/Done x Profile x search filter the manager table."""
+    manager, row, interview = await _scheduled_interview(api, workspace, fresh_client, "p3-filter")
+    steps = (await manager.get("/api/v1/interview-steps")).json()["items"]
+    phone = next(step for step in steps if step["name"] == "Phone call")
+
+    params = {"flow": "new", "step_id": phone["id"]}
+    fresh = (await manager.get("/api/v1/interviews", params=params)).json()
+    assert [item["id"] for item in fresh["items"]] == [interview["id"]]
+    assert fresh["items"][0]["tech_stack"] == "Python, Postgres"
+
+    other = next(step for step in steps if step["name"] == "Final meeting")
+    assert (await manager.get("/api/v1/interviews", params={"step_id": other["id"]})).json()["items"] == []
+
+    profile_id = (await manager.get("/api/v1/profiles")).json()["items"][0]["id"]
+    assert len((await manager.get("/api/v1/interviews", params={"profile_id": profile_id})).json()["items"]) == 1
+    assert (await manager.get("/api/v1/interviews", params={"q": "Company p3-filter"})).json()["items"] != []
+    assert (await manager.get("/api/v1/interviews", params={"q": "nothing-matches"})).json()["items"] == []
+
+    first = interview["steps"][0]
+    await manager.patch(f"/api/v1/interviews/{interview['id']}/steps/{first['id']}", json={"done": True})
+    assert (await manager.get("/api/v1/interviews", params={"flow": "new"})).json()["items"] == []
+    assert len((await manager.get("/api/v1/interviews", params={"flow": "done"})).json()["items"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_interview_with_attachments(api, workspace, fresh_client):
+    """INT-16: Create New attaches a resume and a JD as-is, with no pipeline run."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+
+    resume = await manager.post(
+        "/api/v1/interviews/attachments",
+        data={"kind": "resume"},
+        files={"file": ("candidate.pdf", b"%PDF-1.4 resume", "application/pdf")},
+    )
+    assert resume.status_code == 201, resume.text
+    jd = await manager.post(
+        "/api/v1/interviews/attachments",
+        data={"kind": "jd"},
+        files={"file": ("role.txt", b"Hiring a designer.", "text/plain")},
+    )
+    assert jd.status_code == 201, jd.text
+
+    bad = await manager.post(
+        "/api/v1/interviews/attachments",
+        data={"kind": "resume"},
+        files={"file": ("resume.exe", b"nope", "application/octet-stream")},
+    )
+    assert bad.status_code == 422
+
+    created = await manager.post(
+        "/api/v1/interviews",
+        json={
+            "company_name": "Manual Co",
+            "job_title": "Product Designer",
+            "reviewer_id": str(workspace["reviewer"].id),
+            "meeting_at": "2030-06-01T14:00:00+00:00",
+            "tech_stack": "Figma",
+            "attachment_ids": [resume.json()["id"], jd.json()["id"]],
+        },
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["doc_set"] is None
+    assert body["company_name"] == "Manual Co"
+    assert body["job_title"] == "Product Designer"
+    assert {item["kind"] for item in body["attachments"]} == {"resume", "jd"}
+
+    download = await manager.get(f"/api/v1/interviews/{body['id']}/attachments/{resume.json()['id']}")
+    assert download.status_code == 200
+    assert download.content == b"%PDF-1.4 resume"
+
+    reviewer = await fresh_client("reviewer@example.com", workspace["password"])
+    listed = (await reviewer.get("/api/v1/interviews", params={"tab": "all"})).json()["items"]
+    assert body["id"] in [item["id"] for item in listed]
+    assert (await reviewer.get(f"/api/v1/interviews/{body['id']}/attachments/{resume.json()['id']}")).status_code == 200
+
+    missing = await manager.post(
+        "/api/v1/interviews",
+        json={"company_name": "No files", "job_title": "Nope", "attachment_ids": []},
+    )
+    assert missing.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_users_page_cards_and_information(api, workspace, fresh_client):
+    """USR-9: the Users page lists card stats and stores the Manager's Information note."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    maker_id = str(workspace["maker"].id)
+
+    listed = (await manager.get("/api/v1/users", params={"role": "maker"})).json()["items"]
+    maker = next(row for row in listed if row["id"] == maker_id)
+    assert maker["stats"] is not None
+    for key in ("total_resumes", "resumes_today", "interviews", "interview_pct"):
+        assert key in maker["stats"]
+    assert maker["info"] is None
+
+    updated = await manager.patch(
+        f"/api/v1/users/{maker_id}",
+        json={"info": "Phone 555-0100 · Berlin", "profile_id": str(workspace["profile"].id)},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["info"] == "Phone 555-0100 · Berlin"
+
+    # The profile move goes through the assignment table (the edit dialog used to 422 here).
+    listed = (await manager.get("/api/v1/users", params={"role": "maker"})).json()["items"]
+    maker = next(row for row in listed if row["id"] == maker_id)
+    assert maker["profile_id"] == str(workspace["profile"].id)
+
+    reviewer_id = str(workspace["reviewer"].id)
+    reviewer = next(
+        row
+        for row in (await manager.get("/api/v1/users", params={"role": "reviewer"})).json()["items"]
+        if row["id"] == reviewer_id
+    )
+    assert {"reviews_today", "total_interviews", "by_step"} <= set(reviewer["stats"])
+
+
+@pytest.mark.asyncio
+async def test_reviewer_stats_count_interview_steps(api, workspace, fresh_client):
+    """USR-9: a reviewer's card overview is built from the per-step interview history."""
+    manager, row, interview = await _scheduled_interview(api, workspace, fresh_client, "p4-stats")
+    steps = (await manager.get("/api/v1/interview-steps")).json()["items"]
+    tech = next(step for step in steps if step["name"] == "Tech meeting")
+    first = interview["steps"][0]
+    await manager.patch(
+        f"/api/v1/interviews/{interview['id']}/steps/{first['id']}",
+        json={"done": True, "reviewer_id": str(workspace["reviewer"].id)},
+    )
+    await manager.post(
+        f"/api/v1/interviews/{interview['id']}/steps",
+        json={"step_id": tech["id"], "reviewer_id": str(workspace["reviewer"].id)},
+    )
+
+    reviewer_id = str(workspace["reviewer"].id)
+    reviewer = next(
+        item
+        for item in (await manager.get("/api/v1/users", params={"role": "reviewer"})).json()["items"]
+        if item["id"] == reviewer_id
+    )
+    assert reviewer["stats"]["total_interviews"] >= 1
+    assert reviewer["stats"]["reviews_today"] >= 1
+    names = [entry["name"] for entry in reviewer["stats"]["by_step"]]
+    assert "Phone call" in names and "Tech meeting" in names
+
+
+@pytest.mark.asyncio
+async def test_theme_import_from_resume(api, workspace, fresh_client):
+    """SET-11: an uploaded DOCX is turned into theme params the Manager can tweak."""
+    from docx import Document
+    from docx.shared import Inches, Pt, RGBColor
+
+    document = Document()
+    run = document.add_paragraph().add_run("Jane Doe")
+    run.font.name = "Georgia"
+    run.font.size = Pt(14)
+    run.font.color.rgb = RGBColor(0x1F, 0x4E, 0x79)
+    body = document.add_paragraph().add_run("Backend engineer with API experience.")
+    body.font.name = "Georgia"
+    body.font.size = Pt(11)
+    section = document.sections[0]
+    section.top_margin = Inches(0.8)
+    section.left_margin = Inches(0.9)
+    buffer = io.BytesIO()
+    document.save(buffer)
+
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    response = await manager.post(
+        "/api/v1/themes/import-resume",
+        files={
+            "file": (
+                "jane_resume.docx",
+                buffer.getvalue(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["params"]["font"] == "Georgia"
+    assert body["params"]["size"] == 11.0
+    assert body["params"]["accent"] == "#1F4E79"
+    assert body["params"]["margin_top"] == 0.8
+    assert body["params"]["margin_left"] == 0.9
+    assert "jane resume" in body["name"]
+
+    rejected = await manager.post(
+        "/api/v1/themes/import-resume",
+        files={"file": ("resume.pdf", b"%PDF-1.4", "application/pdf")},
+    )
+    assert rejected.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_provider_edit_create_and_delete_round_trip(api, workspace, fresh_client):
+    """SET-2: a Manager can create, edit and delete providers without a 422/500."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+
+    # Create with the RPM box left empty (the UI sends null) — it must not 422.
+    created = await manager.post(
+        "/api/v1/providers",
+        json={
+            "type": "openai_compatible",
+            "display_name": "Regression Completions",
+            "api_key": "sk-test",
+            "base_url": "https://api.example.com/v1",
+            "default_model": "some-model",
+            "max_concurrency": 4,
+            "rpm": None,
+            "timeout_s": 600,
+            "is_enabled": True,
+        },
+    )
+    assert created.status_code == 201, created.text
+    provider = created.json()
+    assert provider["rpm"] == 60
+
+    # Editing sends the whole form back, including `type`.
+    edited = await manager.patch(
+        f"/api/v1/providers/{provider['id']}",
+        json={
+            "type": "openai_compatible",
+            "display_name": "Regression Completions v2",
+            "base_url": "https://api.example.com/v1",
+            "default_model": "other-model",
+            "max_concurrency": 2,
+            "rpm": 30,
+            "timeout_s": 120,
+            "is_enabled": True,
+        },
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["display_name"] == "Regression Completions v2"
+    assert edited.json()["default_model"] == "other-model"
+
+    # Clearing a number input sends null — the current value is kept.
+    kept = await manager.patch(f"/api/v1/providers/{provider['id']}", json={"rpm": None, "max_concurrency": None})
+    assert kept.status_code == 200, kept.text
+    assert kept.json()["rpm"] == 30
+
+    deleted = await manager.delete(f"/api/v1/providers/{provider['id']}")
+    assert deleted.status_code == 200, deleted.text
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_provider_in_use_reassigns_profiles(api, workspace, fresh_client, db_session):
+    """SET-2: the mock provider can be deleted; profiles move to the default provider."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    providers = (await manager.get("/api/v1/providers")).json()["items"]
+    mock = next(item for item in providers if item["type"] == "mock")
+
+    # Make the demo provider the system default so the mock is deletable.
+    deepseek = await manager.post(
+        "/api/v1/providers",
+        json={
+            "type": "openai_compatible",
+            "display_name": "Replacement provider",
+            "api_key": "sk-test",
+            "base_url": "https://api.example.com/v1",
+            "default_model": "replacement-model",
+            "max_concurrency": 2,
+            "timeout_s": 60,
+        },
+    )
+    assert deepseek.status_code == 201, deepseek.text
+    defaulted = await manager.post(f"/api/v1/providers/{deepseek.json()['id']}/set-default")
+    assert defaulted.status_code == 200, defaulted.text
+
+    # Point the demo profile at the mock so the delete has something to reassign.
+    profile_id = str(workspace["profile"].id)
+    await manager.patch(f"/api/v1/profiles/{profile_id}", json={"provider_id": mock["id"]})
+
+    response = await manager.delete(f"/api/v1/providers/{mock['id']}")
+    assert response.status_code == 200, response.text
+    assert response.json()["profiles_reassigned"] == 1
+
+    profile = (await manager.get(f"/api/v1/profiles/{profile_id}")).json()
+    assert profile["provider_id"] == deepseek.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_models_get_the_litellm_prefix():
+    """CONC-5: a Gemini model typed without ``gemini/`` is routed correctly."""
+    from app.services.llm import litellm_model_name
+
+    assert litellm_model_name("google_gemini", "gemini-2.5-flash") == "gemini/gemini-2.5-flash"
+    assert litellm_model_name("google_gemini", "gemini/gemini-2.5-flash") == "gemini/gemini-2.5-flash"
+    assert litellm_model_name("openai_compatible", "deepseek-chat", "https://api.deepseek.com/v1") == "openai/deepseek-chat"
+    assert litellm_model_name("anthropic", "claude-sonnet-4-5") == "claude-sonnet-4-5"
+
+
+@pytest.mark.asyncio
+async def test_json_mode_is_picked_per_provider():
+    """GEN-3: DeepSeek rejects json_schema, so it is asked for json_object instead."""
+    from app.services.llm import ProviderConfig, is_response_format_error, json_response_format
+
+    schema = {"type": "object", "properties": {}}
+    deepseek = ProviderConfig(
+        id="1", type="openai_compatible", display_name="DeepSeek", model="deepseek-chat",
+        base_url="https://api.deepseek.com/v1",
+    )
+    openai = ProviderConfig(id="2", type="openai", display_name="OpenAI", model="gpt-4o")
+    gemini = ProviderConfig(id="3", type="google_gemini", display_name="Gemini", model="gemini-2.5-flash")
+
+    assert json_response_format(deepseek, schema) == {"type": "json_object"}
+    assert json_response_format(openai, schema)["type"] == "json_schema"
+    assert json_response_format(gemini, schema)["type"] == "json_schema"
+    assert is_response_format_error(Exception("This response_format type is unavailable now"))
+    assert not is_response_format_error(Exception("rate limit exceeded"))
+
+
+@pytest.mark.asyncio
+async def test_submit_without_a_profile_prompt_fails_fast(api, workspace, fresh_client):
+    """PRO-4: a profile with no saved prompt stops at submit instead of burning 10 LLM retries."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    created = await manager.post("/api/v1/profiles", json={"name": "No prompt yet"})
+    assert created.status_code == 201, created.text
+    profile_id = created.json()["id"]
+    assert created.json()["active_prompt"] is None
+
+    assigned = await manager.post(
+        f"/api/v1/profiles/{profile_id}/assignments",
+        json={"maker_ids": [str(workspace["maker_unassigned"].id)]},
+    )
+    assert assigned.status_code == 200, assigned.text
+
+    maker = await fresh_client("maker2@example.com", workspace["password"])
+    rejected = await maker.post("/api/v1/jobs", json={"jd_text": JD})
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["error"]["code"] == "profile_has_no_prompt"
+
+    # Saving a prompt version unblocks the very same submission.
+    saved = await manager.post(f"/api/v1/profiles/{profile_id}/prompt-versions", json={"body": "Write the resume."})
+    assert saved.status_code == 201, saved.text
+    accepted = await maker.post("/api/v1/jobs", json={"jd_text": JD})
+    assert accepted.status_code == 201, accepted.text

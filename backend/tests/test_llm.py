@@ -54,14 +54,20 @@ def test_extract_json_handles_markdown_fences_and_prose():
 class ScriptedClient:
     """Returns the queued payloads in order; records the calls it received."""
 
-    def __init__(self, payloads: list[str]) -> None:
+    def __init__(self, payloads: list[str], finish_reasons: list[str | None] | None = None) -> None:
         self.payloads = payloads
+        self.finish_reasons = finish_reasons
         self.calls: list[str] = []
 
     async def generate_json(self, *, provider, system, user, json_schema, timeout_s):
         self.calls.append(user)
-        payload = self.payloads[min(len(self.calls) - 1, len(self.payloads) - 1)]
-        return LLMResult(json={}, raw=payload, usage={"tokens_in": 1, "tokens_out": 1, "tokens_cached": 0}, latency_ms=5)
+        index = min(len(self.calls) - 1, len(self.payloads) - 1)
+        finish_reason = None if not self.finish_reasons else self.finish_reasons[min(index, len(self.finish_reasons) - 1)]
+        return LLMResult(
+            json={}, raw=self.payloads[index],
+            usage={"tokens_in": 1, "tokens_out": 1, "tokens_cached": 0}, latency_ms=5,
+            finish_reason=finish_reason,
+        )
 
 
 VALID_RESUME = (
@@ -93,6 +99,36 @@ async def test_generate_resume_raises_after_two_repair_rounds():
         )
     assert excinfo.value.code == "invalid_json"
     assert len(client.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_empty_reply_fails_fast_instead_of_burning_the_repair_rounds():
+    """GEN-4: no text at all is a config/model problem, not something to re-ask."""
+    client = ScriptedClient([""])
+    with pytest.raises(LLMError) as excinfo:
+        await generate_resume(
+            client, provider=ProviderConfig(id=None, type="openai_compatible", display_name="d",
+                                            model="deepseek-flash", max_tokens=8000),
+            profile_prompt="prompt", jd_text="jd",
+        )
+    assert excinfo.value.code == "provider_empty_output"
+    assert excinfo.value.provider_error is True
+    assert "8000" in excinfo.value.message
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_reply_cut_off_by_max_tokens_reports_truncation():
+    client = ScriptedClient(["{\"name\": \"Ada\"", "still cut"], finish_reasons=["length", "length"])
+    with pytest.raises(LLMError) as excinfo:
+        await generate_resume(
+            client, provider=ProviderConfig(id=None, type="openai_compatible", display_name="g",
+                                            model="gemini-3.8-flash", max_tokens=8000),
+            profile_prompt="prompt", jd_text="jd",
+        )
+    assert excinfo.value.code == "provider_output_truncated"
+    assert excinfo.value.provider_error is True
+    assert len(client.calls) == 1
 
 
 def test_anthropic_system_prompt_is_cache_marked():

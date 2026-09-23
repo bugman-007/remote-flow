@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Activity, AlertTriangle, PauseCircle } from "lucide-react";
 import { api } from "../../lib/api";
@@ -10,6 +11,7 @@ import type { SystemStatus } from "../../types";
 /** RES-19: needs-attention banner + "Processing now" strip for Managers. */
 export function ProcessingStrip({ onFilterAttention, onFilterRegeneration }: { onFilterAttention: (kind: "blocking" | "regeneration") => void; onFilterRegeneration: () => void }) {
   const { push } = useToast();
+  const [busy, setBusy] = useState(false);
   const status = useQuery({
     queryKey: ["system-status"],
     queryFn: () => api.get<SystemStatus>("/system/status"),
@@ -29,12 +31,15 @@ export function ProcessingStrip({ onFilterAttention, onFilterRegeneration }: { o
     : null;
 
   const toggleIntake = async () => {
+    setBusy(true);
     try {
       await api.post(data.disk.intake_paused ? "/system/intake/resume" : "/system/intake/pause");
       push({ tone: "success", title: t("toast.updated") });
       await status.refetch();
     } catch (error) {
       push({ tone: "error", title: error instanceof Error ? error.message : t("toast.failed") });
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -79,7 +84,7 @@ export function ProcessingStrip({ onFilterAttention, onFilterRegeneration }: { o
             <PauseCircle className="h-3 w-3" /> {t("resumes.intakePaused")}
           </Badge>
         ) : null}
-        <Button size="sm" variant={data.disk.intake_paused ? "primary" : "outline"} className="ml-auto" onClick={() => void toggleIntake()}>
+        <Button size="sm" variant={data.disk.intake_paused ? "primary" : "outline"} className="ml-auto" loading={busy} onClick={() => void toggleIntake()}>
           {data.disk.intake_paused ? t("settings.status.resumeIntake") : t("settings.status.pauseIntake")}
         </Button>
       </Card>

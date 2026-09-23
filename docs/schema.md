@@ -94,6 +94,7 @@ Integrity notes:
 | `keep` | `BOOLEAN` | no |  |
 | `renamed_by` | `VARCHAR(36)` | yes | FK -> users.id |
 | `files_expired_at` | `DATETIME` | yes |  |
+| `downloaded_at` | `DATETIME` | yes | index |
 | `search_tsv` | `TEXT` | yes |  |
 | `id` | `VARCHAR(36)` | no | PK |
 | `created_at` | `DATETIME` | no |  |
@@ -102,6 +103,8 @@ Integrity notes:
 - unique: `job_id`
 
 - index `ix_doc_sets_company_name`: `company_name`
+
+- index `ix_doc_sets_downloaded_at`: `downloaded_at`
 
 - index `ix_doc_sets_is_selected`: `is_selected`
 
@@ -240,6 +243,22 @@ Integrity notes:
 
 - index `ix_generations_status`: `status`
 
+## `interview_attachments`
+
+| column | type | null | key |
+| --- | --- | --- | --- |
+| `interview_id` | `VARCHAR(36)` | yes | FK -> interviews.id, index |
+| `kind` | `VARCHAR(32)` | no |  |
+| `filename` | `VARCHAR(300)` | no |  |
+| `path` | `VARCHAR(1000)` | no |  |
+| `content_type` | `VARCHAR(200)` | yes |  |
+| `size_bytes` | `INTEGER` | yes |  |
+| `id` | `VARCHAR(36)` | no | PK |
+| `created_at` | `DATETIME` | no |  |
+| `updated_at` | `DATETIME` | no |  |
+
+- index `ix_interview_attachments_interview_id`: `interview_id`
+
 ## `interview_events`
 
 | column | type | null | key |
@@ -254,6 +273,58 @@ Integrity notes:
 | `updated_at` | `DATETIME` | no |  |
 
 - index `ix_interview_events_interview_id`: `interview_id`
+
+## `interview_statuses`
+
+| column | type | null | key |
+| --- | --- | --- | --- |
+| `name` | `VARCHAR(120)` | no |  |
+| `color` | `VARCHAR(32)` | yes |  |
+| `position` | `INTEGER` | no | index |
+| `is_active` | `BOOLEAN` | no |  |
+| `id` | `VARCHAR(36)` | no | PK |
+| `created_at` | `DATETIME` | no |  |
+| `updated_at` | `DATETIME` | no |  |
+
+- unique: `name`
+
+- index `ix_interview_statuses_position`: `position`
+
+## `interview_step_records`
+
+| column | type | null | key |
+| --- | --- | --- | --- |
+| `interview_id` | `VARCHAR(36)` | no | FK -> interviews.id, index |
+| `step_id` | `VARCHAR(36)` | yes | FK -> interview_steps.id |
+| `position` | `INTEGER` | no |  |
+| `reviewer_id` | `VARCHAR(36)` | yes | FK -> users.id, index |
+| `done` | `BOOLEAN` | no |  |
+| `rejected` | `BOOLEAN` | no |  |
+| `note` | `TEXT` | yes |  |
+| `done_at` | `DATETIME` | yes |  |
+| `id` | `VARCHAR(36)` | no | PK |
+| `created_at` | `DATETIME` | no |  |
+| `updated_at` | `DATETIME` | no |  |
+
+- index `ix_interview_step_records_interview_id`: `interview_id`
+
+- index `ix_interview_step_records_reviewer_id`: `reviewer_id`
+
+## `interview_steps`
+
+| column | type | null | key |
+| --- | --- | --- | --- |
+| `name` | `VARCHAR(120)` | no |  |
+| `color` | `VARCHAR(32)` | yes |  |
+| `position` | `INTEGER` | no | index |
+| `is_active` | `BOOLEAN` | no |  |
+| `id` | `VARCHAR(36)` | no | PK |
+| `created_at` | `DATETIME` | no |  |
+| `updated_at` | `DATETIME` | no |  |
+
+- unique: `name`
+
+- index `ix_interview_steps_position`: `position`
 
 ## `interview_templates`
 
@@ -271,8 +342,8 @@ Integrity notes:
 
 | column | type | null | key |
 | --- | --- | --- | --- |
-| `doc_set_id` | `VARCHAR(36)` | no | FK -> doc_sets.id, index |
-| `generation_id` | `VARCHAR(36)` | no | FK -> generations.id |
+| `doc_set_id` | `VARCHAR(36)` | yes | FK -> doc_sets.id, index |
+| `generation_id` | `VARCHAR(36)` | yes | FK -> generations.id |
 | `reviewer_id` | `VARCHAR(36)` | yes | FK -> users.id, index |
 | `template_id` | `VARCHAR(36)` | yes | FK -> interview_templates.id |
 | `template_snapshot` | `JSON` | yes |  |
@@ -280,12 +351,19 @@ Integrity notes:
 | `meeting_at` | `DATETIME` | yes | index |
 | `meeting_tz` | `VARCHAR(100)` | yes |  |
 | `status` | `VARCHAR(32)` | no | index |
+| `tech_stack` | `VARCHAR(500)` | yes |  |
+| `status_id` | `VARCHAR(36)` | yes | FK -> interview_statuses.id, index |
+| `company_name` | `VARCHAR(300)` | yes | index |
+| `job_title` | `VARCHAR(300)` | yes |  |
+| `candidate_name` | `VARCHAR(300)` | yes |  |
 | `created_by` | `VARCHAR(36)` | yes | FK -> users.id |
 | `cancelled_at` | `DATETIME` | yes |  |
 | `seen_by_reviewer_at` | `DATETIME` | yes |  |
 | `id` | `VARCHAR(36)` | no | PK |
 | `created_at` | `DATETIME` | no |  |
 | `updated_at` | `DATETIME` | no |  |
+
+- index `ix_interviews_company_name`: `company_name`
 
 - index `ix_interviews_doc_set_id`: `doc_set_id`
 
@@ -294,6 +372,8 @@ Integrity notes:
 - index `ix_interviews_reviewer_id`: `reviewer_id`
 
 - index `ix_interviews_status`: `status`
+
+- index `ix_interviews_status_id`: `status_id`
 
 ## `jobs`
 
@@ -511,6 +591,7 @@ Integrity notes:
 | `is_active` | `BOOLEAN` | no |  |
 | `must_change_password` | `BOOLEAN` | no |  |
 | `daily_limit` | `INTEGER` | yes |  |
+| `info` | `TEXT` | yes |  |
 | `last_login_at` | `DATETIME` | yes |  |
 | `id` | `VARCHAR(36)` | no | PK |
 | `created_at` | `DATETIME` | no |  |

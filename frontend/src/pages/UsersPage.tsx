@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, KeyRound, Plus, RefreshCw, ShieldOff, Upload, UserCheck, UserX } from "lucide-react";
+import { Copy, Plus, RefreshCw, Upload } from "lucide-react";
 import { api, errorMessage } from "../lib/api";
 import { t } from "../i18n";
-import { Badge, Button, Card, Checkbox, EmptyState, ErrorNote, Field, Input, Select, Spinner } from "../ui/primitives";
+import { Button, Card, Checkbox, EmptyState, ErrorNote, Field, Input, Select, Spinner } from "../ui/primitives";
 import { Dialog } from "../ui/dialog";
-import { Table } from "../ui/table";
 import { useToast } from "../ui/toast";
-import { formatDate, formatDateTime } from "../lib/format";
+import { UserCard } from "./users/UserCard";
 import type { Profile, User } from "../types";
 
 export function UsersPage() {
@@ -31,6 +30,42 @@ export function UsersPage() {
 
   const refresh = () => void queryClient.invalidateQueries({ queryKey: ["users"] });
   const rows = users.data?.items ?? [];
+
+  const resetPassword = async (user: User) => {
+    try {
+      const result = await api.post<{ temporary_password: string }>(`/users/${user.id}/reset-password`);
+      setTemporary([{ email: user.email, password: result.temporary_password }]);
+      refresh();
+    } catch (error) {
+      push({ tone: "error", title: errorMessage(error) });
+    }
+  };
+
+  const revokeSessions = async (user: User) => {
+    try {
+      const result = await api.post<{ revoked: number }>(`/users/${user.id}/revoke-sessions`);
+      push({ tone: "success", title: `${t("users.revokeSessions")} · ${result.revoked}` });
+      refresh();
+    } catch (error) {
+      push({ tone: "error", title: errorMessage(error) });
+    }
+  };
+
+  const toggleActive = async (user: User) => {
+    if (user.is_active && !window.confirm(t("confirm.deactivate", { name: user.name }))) return;
+    try {
+      await api.post(`/users/${user.id}/${user.is_active ? "deactivate" : "reactivate"}`);
+      refresh();
+    } catch (error) {
+      push({ tone: "error", title: errorMessage(error) });
+    }
+  };
+
+  const sections: { key: "manager" | "maker" | "reviewer"; title: string; rows: User[] }[] = [
+    { key: "manager", title: t("users.sections.managers"), rows: rows.filter((user) => user.role === "manager") },
+    { key: "maker", title: t("users.sections.makers"), rows: rows.filter((user) => user.role === "maker") },
+    { key: "reviewer", title: t("users.sections.reviewers"), rows: rows.filter((user) => user.role === "reviewer") },
+  ];
 
   return (
     <div className="space-y-4">
@@ -69,110 +104,43 @@ export function UsersPage() {
         </div>
       </div>
 
-      <Card>
-        {users.isLoading ? (
+      {users.isLoading ? (
+        <Card>
           <p className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
             <Spinner /> {t("common.loading")}
           </p>
-        ) : users.isError ? (
+        </Card>
+      ) : users.isError ? (
+        <Card>
           <ErrorNote>{errorMessage(users.error)}</ErrorNote>
-        ) : rows.length === 0 ? (
+        </Card>
+      ) : rows.length === 0 ? (
+        <Card>
           <EmptyState title={t("common.noResults")} />
-        ) : (
-          <Table>
-            <thead>
-              <tr>
-                <th>{t("common.name")}</th>
-                <th>{t("common.email")}</th>
-                <th>{t("common.role")}</th>
-                <th>{t("common.status")}</th>
-                <th>{t("users.profile")}</th>
-                <th>{t("users.dailyLimit")}</th>
-                <th>{t("users.usedToday")}</th>
-                <th>{t("users.lastLogin")}</th>
-                <th>{t("common.created")}</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((user) => (
-                <tr key={user.id} className="hover:bg-accent/40">
-                  <td className="font-medium">{user.name}</td>
-                  <td className="text-xs">{user.email}</td>
-                  <td>
-                    <Badge tone={user.role === "manager" ? "info" : "outline"}>{user.role}</Badge>
-                  </td>
-                  <td>
-                    <Badge tone={user.is_active ? "success" : "neutral"}>
-                      {user.is_active ? t("users.status.active") : t("users.status.deactivated")}
-                    </Badge>
-                  </td>
-                  <td>{user.profile_name ?? "—"}</td>
-                  <td>{user.role === "maker" ? (user.daily_limit ?? "—") : "—"}</td>
-                  <td>{user.role === "maker" ? (user.usage_today ?? 0) : "—"}</td>
-                  <td className="text-xs">{user.last_login_at ? formatDateTime(user.last_login_at) : "—"}</td>
-                  <td className="text-xs">{formatDate(user.created_at)}</td>
-                  <td>
-                    <div className="flex items-center justify-end gap-1">
-                      <Button size="sm" variant="ghost" title={t("common.edit")} onClick={() => setEditing(user)}>
-                        {t("common.edit")}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        title={t("users.resetPassword")}
-                        onClick={async () => {
-                          try {
-                            const result = await api.post<{ temporary_password: string }>(`/users/${user.id}/reset-password`);
-                            setTemporary([{ email: user.email, password: result.temporary_password }]);
-                            refresh();
-                          } catch (error) {
-                            push({ tone: "error", title: errorMessage(error) });
-                          }
-                        }}
-                      >
-                        <KeyRound className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        title={t("users.revokeSessions")}
-                        onClick={async () => {
-                          try {
-                            const result = await api.post<{ revoked: number }>(`/users/${user.id}/revoke-sessions`);
-                            push({ tone: "success", title: `${t("users.revokeSessions")} · ${result.revoked}` });
-                            refresh();
-                          } catch (error) {
-                            push({ tone: "error", title: errorMessage(error) });
-                          }
-                        }}
-                      >
-                        <ShieldOff className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        title={user.is_active ? t("users.deactivate") : t("users.reactivate")}
-                        onClick={async () => {
-                          if (user.is_active && !window.confirm(t("confirm.deactivate", { name: user.name }))) return;
-                          try {
-                            await api.post(`/users/${user.id}/${user.is_active ? "deactivate" : "reactivate"}`);
-                            refresh();
-                          } catch (error) {
-                            push({ tone: "error", title: errorMessage(error) });
-                          }
-                        }}
-                      >
-                        {user.is_active ? <UserX className="h-3.5 w-3.5" /> : <UserCheck className="h-3.5 w-3.5" />}
-                      </Button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
-        )}
-      </Card>
+        </Card>
+      ) : (
+        sections
+          .filter((section) => section.rows.length > 0)
+          .map((section) => (
+            <section key={section.key} className="space-y-2">
+              <h2 className="text-sm font-semibold">
+                {section.title} <span className="text-muted-foreground">({section.rows.length})</span>
+              </h2>
+              <div className="grid gap-3 tablet:grid-cols-2 xl:grid-cols-3">
+                {section.rows.map((user) => (
+                  <UserCard
+                    key={user.id}
+                    user={user}
+                    onEdit={() => setEditing(user)}
+                    onResetPassword={() => void resetPassword(user)}
+                    onRevokeSessions={() => void revokeSessions(user)}
+                    onToggleActive={() => void toggleActive(user)}
+                  />
+                ))}
+              </div>
+            </section>
+          ))
+      )}
 
       <UserDialog
         open={creating || Boolean(editing)}
@@ -306,8 +274,8 @@ function UserDialog({
           <Button variant="outline" onClick={onClose} disabled={busy}>
             {t("common.cancel")}
           </Button>
-          <Button onClick={() => void submit()} disabled={busy || !draft.name || !draft.email}>
-            {busy ? t("common.saving") : t("common.save")}
+          <Button onClick={() => void submit()} loading={busy} disabled={!draft.name || !draft.email}>
+            {t("common.save")}
           </Button>
         </>
       }

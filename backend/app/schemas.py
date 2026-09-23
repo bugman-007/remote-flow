@@ -88,6 +88,11 @@ class AssignmentRequest(Model):
     maker_ids: list[str]
 
 
+PROVIDER_TYPE_VALUES = (
+    "anthropic", "openai", "azure_openai", "google_gemini", "openrouter", "openai_compatible", "mock"
+)
+
+
 class ProviderRequest(Model):
     type: Literal[
         "anthropic", "openai", "azure_openai", "google_gemini", "openrouter", "openai_compatible", "mock"
@@ -96,26 +101,65 @@ class ProviderRequest(Model):
     api_key: str | None = None
     base_url: str | None = None
     default_model: str | None = None
-    max_concurrency: int = 8
-    rpm: int = 60
-    timeout_s: int = 600
+    max_concurrency: int = Field(default=8, ge=1)
+    #: ``None`` means "no cap"; the router stores the 60 rpm default.
+    rpm: int | None = Field(default=None, ge=1)
+    timeout_s: int = Field(default=600, ge=5)
     is_enabled: bool = True
 
 
 class ProviderUpdate(Model):
+    type: Literal[
+        "anthropic", "openai", "azure_openai", "google_gemini", "openrouter", "openai_compatible", "mock"
+    ] | None = None
     display_name: str | None = None
     api_key: str | None = None
     base_url: str | None = None
     default_model: str | None = None
-    max_concurrency: int | None = None
-    rpm: int | None = None
-    timeout_s: int | None = None
+    max_concurrency: int | None = Field(default=None, ge=1)
+    rpm: int | None = Field(default=None, ge=1)
+    timeout_s: int | None = Field(default=None, ge=5)
     is_enabled: bool | None = None
 
 
 class ThemeRequest(Model):
     name: str
     description: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaxonomyRequest(Model):
+    """INT-14: a manager-defined interview step or status label."""
+
+    name: str = Field(min_length=1, max_length=120)
+    color: str | None = None
+
+
+class TaxonomyUpdate(Model):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    color: str | None = None
+    position: int | None = None
+    is_active: bool | None = None
+
+
+class StepRecordRequest(Model):
+    """INT-15: add a step hop to an interview."""
+
+    step_id: str | None = None
+    reviewer_id: str | None = None
+    note: str | None = None
+
+
+class StepRecordUpdate(Model):
+    reviewer_id: str | None = None
+    done: bool | None = None
+    rejected: bool | None = None
+    note: str | None = None
+
+
+class ThemePreviewRequest(Model):
+    """SET-10: preview unsaved theme params inside the theme dialog."""
+
     params: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -138,6 +182,8 @@ class UserRequest(Model):
     profile_id: str | None = None
     password: str | None = None
     must_change_password: bool = True
+    #: USR-9: free-form Manager note shown on the Users page card.
+    info: str | None = None
 
 
 class UserUpdate(Model):
@@ -146,6 +192,9 @@ class UserUpdate(Model):
     role: Literal["maker", "manager", "reviewer"] | None = None
     daily_limit: int | None = None
     is_active: bool | None = None
+    profile_id: str | None = None
+    must_change_password: bool | None = None
+    info: str | None = None
 
 
 class SettingsUpdate(Model):
@@ -159,12 +208,21 @@ class InterviewTemplateRequest(Model):
 
 
 class InterviewRequest(Model):
-    doc_set_id: str
+    """INT-3/INT-14/INT-16: schedule an existing doc set or a hand-made interview."""
+
+    doc_set_id: str | None = None
     reviewer_id: str | None = None
     template_id: str | None = None
     values: dict[str, Any] = Field(default_factory=dict)
     meeting_at: datetime | None = None
     meeting_tz: str | None = None
+    step_id: str | None = None
+    status_id: str | None = None
+    tech_stack: str | None = None
+    company_name: str | None = None
+    job_title: str | None = None
+    candidate_name: str | None = None
+    attachment_ids: list[str] = Field(default_factory=list)
 
 
 class InterviewUpdate(Model):
@@ -174,6 +232,10 @@ class InterviewUpdate(Model):
     meeting_tz: str | None = None
     status: Literal["scheduled", "completed", "cancelled", "no_show"] | None = None
     template_id: str | None = None
+    status_id: str | None = None
+    tech_stack: str | None = None
+    company_name: str | None = None
+    job_title: str | None = None
 
 
 class FeedbackRequest(Model):
@@ -190,6 +252,8 @@ class DuplicateInterviewRequest(Model):
 
 class TestPromptRequest(Model):
     jd_text: str
+    #: When set, test this text instead of the saved active prompt.
+    prompt_body: str | None = None
 
 
 class DocSetPatch(Model):

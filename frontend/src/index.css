@@ -75,6 +75,20 @@
     @apply overflow-x-auto;
   }
 
+  /* UI-8: indeterminate top progress bar while API calls are in flight. */
+  @keyframes rf-loading-bar {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(400%);
+    }
+  }
+
+  .animate-loading-bar {
+    animation: rf-loading-bar 1.1s ease-in-out infinite;
+  }
+
   /* UI-3: below tablet width every table row becomes a labelled card. */
   @media (max-width: 767px) {
     .rf-table thead {

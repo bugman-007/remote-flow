@@ -45,6 +45,57 @@ def test_highlight_parsing_supports_span_suffix_and_markdown():
     assert [run.bold for run in runs] == [False, True, False, True, False, True]
 
 
+def test_placeholder_contact_values_are_dropped():
+    """A model that answers "None"/"N/A" instead of omitting the key must not leak it."""
+    blocks = core.build_blocks(
+        {
+            "name": "Ada Lovelace",
+            "title": "Engineer",
+            "email": "ada@example.com",
+            "location": "London",
+            "citizenship": "None",
+            "work_authorization": "N/A",
+            "linkedin": "linkedin.com/in/ada",
+            "summary": "s",
+            "experience": [{"title": "Engineer", "company": "Acme", "bullets": ["b"]}],
+        }
+    )
+    text = "".join(run.text for run in next(b for b in blocks if b.kind == "contact").runs)
+    assert text == "ada@example.com  ·  London  ·  linkedin.com/in/ada"
+
+
+def test_additional_information_is_never_rendered():
+    """The generator skips the section even when the model returns it (GEN-4)."""
+    data = json.loads(SAMPLE.read_text())
+    assert data["additional_information"]  # the fixture does carry the section
+    blocks = core.build_blocks(data)
+    rendered = "\n".join("".join(run.text for run in block.runs) for block in blocks)
+    assert "Additional Information" not in rendered
+    assert "English (native)" not in rendered
+    assert all(block.label != "Interests" for block in blocks)
+
+
+def test_missing_optional_fields_do_not_render_as_none():
+    """A null citizenship/work_authorization must be skipped, not printed as "None"."""
+    blocks = core.build_blocks(
+        {
+            "name": "Ada Lovelace",
+            "title": "Engineer",
+            "email": "ada@example.com",
+            "phone": None,
+            "location": "London",
+            "citizenship": None,
+            "work_authorization": None,
+            "summary": "s",
+            "experience": [{"title": "Engineer", "company": "Acme", "location": None, "bullets": ["b"]}],
+        }
+    )
+    contact = next(block for block in blocks if block.kind == "contact")
+    text = "".join(run.text for run in contact.runs)
+    assert "None" not in text
+    assert text == "ada@example.com  ·  London"
+
+
 def test_compose_job_info_uses_injected_description():
     data = json.loads(SAMPLE.read_text())
     data["job_description"] = "Original JD text"

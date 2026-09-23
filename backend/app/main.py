@@ -18,7 +18,20 @@ from app.db import get_engine, session_scope
 from app.deps import manager_required
 from app.errors import install_error_handlers
 from app.logging_setup import configure_logging, request_id_var, user_id_var
-from app.routers import auth, doc_sets, events, files, interviews, jobs, ops, profiles, settings as settings_router, stats, users
+from app.routers import (
+    auth,
+    doc_sets,
+    events,
+    files,
+    interview_taxonomy,
+    interviews,
+    jobs,
+    ops,
+    profiles,
+    settings as settings_router,
+    stats,
+    users,
+)
 
 logger = logging.getLogger(__name__)
 API_PREFIX = "/api/v1"
@@ -61,6 +74,9 @@ async def lifespan(app: FastAPI):
 
         await settings_store.ensure_defaults(session)
         await seed_default_theme(session)
+        from app.services.seeds import ensure_interview_taxonomy
+
+        await ensure_interview_taxonomy(session)
         if settings.seed_on_start:
             from app.services.seeds import seed_demo_data
 
@@ -138,6 +154,7 @@ def create_app() -> FastAPI:
         files.router,
         profiles.router,
         interviews.router,
+        interview_taxonomy.router,
         settings_router.router,
         users.router,
         stats.router,
