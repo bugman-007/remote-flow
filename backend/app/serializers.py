@@ -31,6 +31,7 @@ def user_out(user: User) -> dict:
         "is_active": user.is_active,
         "must_change_password": user.must_change_password,
         "daily_limit": user.daily_limit,
+        "info": user.info,
         "last_login_at": user.last_login_at,
         "created_at": user.created_at,
     }

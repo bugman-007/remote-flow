@@ -8,7 +8,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, File, Request, UploadFile
 from fastapi.responses import Response
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,7 +42,14 @@ from app.schemas import (
 from app.serializers import provider_out, theme_out
 from app.services import events, metrics, pipeline, render, retention, settings_store, storage
 from app.services.crypto import decrypt_secret, encrypt_secret
-from app.services.theme import RENDER_FONTS, ThemeValidationError, seed_default_theme, theme_form_spec, validate_theme_params
+from app.services.theme import (
+    RENDER_FONTS,
+    ThemeValidationError,
+    seed_default_theme,
+    theme_form_spec,
+    theme_from_docx,
+    validate_theme_params,
+)
 from app.utils import utcnow
 from vendor.resume_builder import GENERATOR_VERSION, core
 
@@ -285,6 +292,26 @@ async def preview_theme_params(
     except ThemeValidationError as exc:
         raise APIError("invalid_theme", str(exc), status_code=422) from exc
     return _render_theme_preview(params, theme_id=None)
+
+
+@router.post("/themes/import-resume")
+async def import_theme_from_resume(
+    file: UploadFile = File(...),
+    _: User = Depends(manager_required),
+):
+    """SET-11: guess theme params from an existing resume so the Manager can tweak them."""
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix != ".docx":
+        raise APIError("invalid_file", "Upload a .docx resume.", status_code=422)
+    payload = await file.read()
+    if not payload:
+        raise APIError("invalid_file", "The file is empty.", status_code=422)
+    if len(payload) > 20 * 1024 * 1024:
+        raise APIError("invalid_file", "Files must be 20 MB or smaller.", status_code=413)
+    try:
+        return theme_from_docx(payload, filename=file.filename or "resume.docx")
+    except ThemeValidationError as exc:
+        raise APIError("invalid_docx", str(exc), status_code=422) from exc
 
 
 @router.post("/themes", status_code=201)

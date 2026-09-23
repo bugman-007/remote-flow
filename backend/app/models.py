@@ -124,6 +124,8 @@ class User(PkMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: USR-9: free-form note the Manager keeps about this person (phone, location…).
+    info: Mapped[str | None] = mapped_column(Text)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTimeTZ)
 
     jobs: Mapped[list["Job"]] = relationship(back_populates="maker", foreign_keys="Job.maker_id")

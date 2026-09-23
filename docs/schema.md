@@ -591,6 +591,7 @@ Integrity notes:
 | `is_active` | `BOOLEAN` | no |  |
 | `must_change_password` | `BOOLEAN` | no |  |
 | `daily_limit` | `INTEGER` | yes |  |
+| `info` | `TEXT` | yes |  |
 | `last_login_at` | `DATETIME` | yes |  |
 | `id` | `VARCHAR(36)` | no | PK |
 | `created_at` | `DATETIME` | no |  |

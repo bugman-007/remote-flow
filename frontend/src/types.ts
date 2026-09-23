@@ -1,5 +1,17 @@
 export type Role = "maker" | "manager" | "reviewer";
 
+export interface UserStats {
+  // Maker card
+  total_resumes?: number;
+  resumes_today?: number;
+  interviews?: number;
+  interview_pct?: number;
+  // Reviewer card
+  reviews_today?: number;
+  total_interviews?: number;
+  by_step?: { name: string; color: string | null; count: number }[];
+}
+
 export interface User {
   id: string;
   name: string;
@@ -16,6 +28,9 @@ export interface User {
   usage_today?: number;
   sessions?: number;
   open_interviews?: number;
+  // USR-9 extras
+  info?: string | null;
+  stats?: UserStats | null;
 }
 
 export interface Pagination {

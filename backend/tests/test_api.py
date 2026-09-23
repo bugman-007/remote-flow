@@ -1130,3 +1130,112 @@ async def test_manual_interview_with_attachments(api, workspace, fresh_client):
         json={"company_name": "No files", "job_title": "Nope", "attachment_ids": []},
     )
     assert missing.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_users_page_cards_and_information(api, workspace, fresh_client):
+    """USR-9: the Users page lists card stats and stores the Manager's Information note."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    maker_id = str(workspace["maker"].id)
+
+    listed = (await manager.get("/api/v1/users", params={"role": "maker"})).json()["items"]
+    maker = next(row for row in listed if row["id"] == maker_id)
+    assert maker["stats"] is not None
+    for key in ("total_resumes", "resumes_today", "interviews", "interview_pct"):
+        assert key in maker["stats"]
+    assert maker["info"] is None
+
+    updated = await manager.patch(
+        f"/api/v1/users/{maker_id}",
+        json={"info": "Phone 555-0100 · Berlin", "profile_id": str(workspace["profile"].id)},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["info"] == "Phone 555-0100 · Berlin"
+
+    # The profile move goes through the assignment table (the edit dialog used to 422 here).
+    listed = (await manager.get("/api/v1/users", params={"role": "maker"})).json()["items"]
+    maker = next(row for row in listed if row["id"] == maker_id)
+    assert maker["profile_id"] == str(workspace["profile"].id)
+
+    reviewer_id = str(workspace["reviewer"].id)
+    reviewer = next(
+        row
+        for row in (await manager.get("/api/v1/users", params={"role": "reviewer"})).json()["items"]
+        if row["id"] == reviewer_id
+    )
+    assert {"reviews_today", "total_interviews", "by_step"} <= set(reviewer["stats"])
+
+
+@pytest.mark.asyncio
+async def test_reviewer_stats_count_interview_steps(api, workspace, fresh_client):
+    """USR-9: a reviewer's card overview is built from the per-step interview history."""
+    manager, row, interview = await _scheduled_interview(api, workspace, fresh_client, "p4-stats")
+    steps = (await manager.get("/api/v1/interview-steps")).json()["items"]
+    tech = next(step for step in steps if step["name"] == "Tech meeting")
+    first = interview["steps"][0]
+    await manager.patch(
+        f"/api/v1/interviews/{interview['id']}/steps/{first['id']}",
+        json={"done": True, "reviewer_id": str(workspace["reviewer"].id)},
+    )
+    await manager.post(
+        f"/api/v1/interviews/{interview['id']}/steps",
+        json={"step_id": tech["id"], "reviewer_id": str(workspace["reviewer"].id)},
+    )
+
+    reviewer_id = str(workspace["reviewer"].id)
+    reviewer = next(
+        item
+        for item in (await manager.get("/api/v1/users", params={"role": "reviewer"})).json()["items"]
+        if item["id"] == reviewer_id
+    )
+    assert reviewer["stats"]["total_interviews"] >= 1
+    assert reviewer["stats"]["reviews_today"] >= 1
+    names = [entry["name"] for entry in reviewer["stats"]["by_step"]]
+    assert "Phone call" in names and "Tech meeting" in names
+
+
+@pytest.mark.asyncio
+async def test_theme_import_from_resume(api, workspace, fresh_client):
+    """SET-11: an uploaded DOCX is turned into theme params the Manager can tweak."""
+    from docx import Document
+    from docx.shared import Inches, Pt, RGBColor
+
+    document = Document()
+    run = document.add_paragraph().add_run("Jane Doe")
+    run.font.name = "Georgia"
+    run.font.size = Pt(14)
+    run.font.color.rgb = RGBColor(0x1F, 0x4E, 0x79)
+    body = document.add_paragraph().add_run("Backend engineer with API experience.")
+    body.font.name = "Georgia"
+    body.font.size = Pt(11)
+    section = document.sections[0]
+    section.top_margin = Inches(0.8)
+    section.left_margin = Inches(0.9)
+    buffer = io.BytesIO()
+    document.save(buffer)
+
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    response = await manager.post(
+        "/api/v1/themes/import-resume",
+        files={
+            "file": (
+                "jane_resume.docx",
+                buffer.getvalue(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["params"]["font"] == "Georgia"
+    assert body["params"]["size"] == 11.0
+    assert body["params"]["accent"] == "#1F4E79"
+    assert body["params"]["margin_top"] == 0.8
+    assert body["params"]["margin_left"] == 0.9
+    assert "jane resume" in body["name"]
+
+    rejected = await manager.post(
+        "/api/v1/themes/import-resume",
+        files={"file": ("resume.pdf", b"%PDF-1.4", "application/pdf")},
+    )
+    assert rejected.status_code == 422

@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Eye, Plus } from "lucide-react";
+import { Eye, FileUp, Plus } from "lucide-react";
 import { api, errorMessage } from "../../lib/api";
 import { Badge, Button, Card, EmptyState, ErrorNote, Field, Input, Select, Spinner, Textarea } from "../../ui/primitives";
 import { Dialog } from "../../ui/dialog";
@@ -179,6 +179,9 @@ function ThemeDialog({
   const [busy, setBusy] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importSource, setImportSource] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
 
   const profiles = useQuery({
     queryKey: ["profiles"],
@@ -192,6 +195,7 @@ function ThemeDialog({
     setDescription(theme?.description ?? "");
     setParams({ ...defaults, ...(theme?.params ?? {}) });
     setAssigned((theme?.profiles ?? []).map((profile) => profile.id));
+    setImportSource(null);
     setError(null);
   }, [open, theme, defaults]);
 
@@ -220,6 +224,40 @@ function ThemeDialog({
       return null;
     });
   }, [open]);
+
+  // SET-11: read an existing resume and pre-fill the form so the Manager can tweak it.
+  const importResume = async (file: File) => {
+    setError(null);
+    setImportBusy(true);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const result = await api.post<{
+        name: string;
+        description: string;
+        params: ThemeParams;
+        source: { font: string | null; size: number; accent: string };
+        warnings: string[];
+      }>("/themes/import-resume", body);
+      setName(result.name);
+      setDescription(result.description);
+      setParams({ ...defaults, ...result.params });
+      setImportSource(
+        t("settings.themes.importSource", {
+          font: result.source.font ?? "—",
+          size: result.source.size,
+          accent: result.source.accent,
+        }),
+      );
+      push({ tone: "success", title: t("settings.themes.importDone", { name: file.name }) });
+      if (result.warnings.length) setError(result.warnings.join(" "));
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setImportBusy(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
 
   const save = async () => {
     setBusy(true);
@@ -301,6 +339,30 @@ function ThemeDialog({
             )}
           </Field>
         ))}
+        <Field label={t("settings.themes.importResume")} hint={t("settings.themes.importHint")} className="tablet:col-span-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".docx"
+              className="text-xs"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) void importResume(file);
+              }}
+            />
+            {importBusy ? (
+              <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Spinner /> {t("settings.themes.importRunning")}
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                <FileUp className="h-3.5 w-3.5" /> .docx
+              </span>
+            )}
+          </div>
+          {importSource ? <p className="mt-1 text-xs text-muted-foreground">{importSource}</p> : null}
+        </Field>
         <Field label={t("settings.themes.assign")} className="tablet:col-span-2">
           <div className="flex flex-wrap gap-3">
             {(profiles.data?.items ?? []).map((profile) => (

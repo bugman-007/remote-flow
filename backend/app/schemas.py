@@ -173,6 +173,8 @@ class UserRequest(Model):
     profile_id: str | None = None
     password: str | None = None
     must_change_password: bool = True
+    #: USR-9: free-form Manager note shown on the Users page card.
+    info: str | None = None
 
 
 class UserUpdate(Model):
@@ -181,6 +183,9 @@ class UserUpdate(Model):
     role: Literal["maker", "manager", "reviewer"] | None = None
     daily_limit: int | None = None
     is_active: bool | None = None
+    profile_id: str | None = None
+    must_change_password: bool | None = None
+    info: str | None = None
 
 
 class SettingsUpdate(Model):
