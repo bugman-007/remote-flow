@@ -52,20 +52,28 @@ def _json():
 
 
 def _insert(table: str, rows: list[tuple[str, str]]) -> dict[str, str]:
-    """Insert name/colour rows and return ``name -> id``."""
+    """Insert name/colour rows and return ``name -> id``.
+
+    The id is bound with the app's GUID type and the values are passed at execute
+    time: a value bound into the statement itself reaches asyncpg as
+    ``$1::VARCHAR`` and Postgres rejects it for a native ``uuid`` column.
+    """
     ids: dict[str, str] = {}
     now = datetime.now(timezone.utc)
+    bind = op.get_bind()
+    statement = sa.text(
+        f"INSERT INTO {table} (id, name, color, position, is_active, created_at, updated_at) "
+        "VALUES (:id, :name, :color, :position, :is_active, :created_at, :updated_at)"
+    ).bindparams(sa.bindparam("id", type_=app.models.GUID))
     for position, (name, color) in enumerate(rows):
         row_id = str(uuid.uuid4())
         ids[name] = row_id
-        op.execute(
-            sa.text(
-                f"INSERT INTO {table} (id, name, color, position, is_active, created_at, updated_at) "
-                "VALUES (:id, :name, :color, :position, :is_active, :created_at, :updated_at)"
-            ).bindparams(
-                id=row_id, name=name, color=color, position=position,
-                is_active=True, created_at=now, updated_at=now,
-            )
+        bind.execute(
+            statement,
+            {
+                "id": row_id, "name": name, "color": color, "position": position,
+                "is_active": True, "created_at": now, "updated_at": now,
+            },
         )
     return ids
 
@@ -162,12 +170,11 @@ def upgrade() -> None:
         )
     )
 
+    update = sa.text("UPDATE interviews SET status_id = :status_id WHERE status = :legacy").bindparams(
+        sa.bindparam("status_id", type_=app.models.GUID)
+    )
     for legacy, label in STATUS_MAP.items():
-        op.execute(
-            sa.text("UPDATE interviews SET status_id = :status_id WHERE status = :legacy").bindparams(
-                status_id=status_ids[label], legacy=legacy
-            )
-        )
+        op.get_bind().execute(update, {"status_id": status_ids[label], "legacy": legacy})
 
 
 def downgrade() -> None:

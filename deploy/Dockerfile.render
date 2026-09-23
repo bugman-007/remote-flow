@@ -1,10 +1,10 @@
 # worker-render: Python + LibreOffice + metric-compatible fonts + unoserver (Appendix A.4).
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    RB_PDF_BACKEND=unoserver \
+    RB_PDF_BACKEND=soffice \
     RENDER_CONCURRENCY=1 \
     UNOSERVER_MAX_CONVERSIONS=200 \
     UNOSERVER_MAX_RSS_MB=700 \
@@ -14,7 +14,7 @@ WORKDIR /app
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        libreoffice-writer \
+        libreoffice-writer-nogui \
         libreoffice-core-nogui \
         fontconfig \
         fonts-crosextra-carlito \
@@ -23,7 +23,6 @@ RUN apt-get update \
         fonts-liberation2 \
         fonts-dejavu \
         fonts-noto-core \
-        fonts-gelasio \
         curl \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -39,10 +38,19 @@ RUN pip install -r requirements.txt
 COPY backend/ ./backend/
 COPY deploy/unoserver-entrypoint.sh /usr/local/bin/unoserver-entrypoint
 RUN chmod +x /usr/local/bin/unoserver-entrypoint \
-    && useradd --uid 10002 --create-home --shell /usr/sbin/nologin app \
+    # The storage volume is shared with the api/llm workers, so the uid must
+    # match theirs or every write into /storage fails with EACCES.
+    && useradd --uid 10001 --create-home --shell /usr/sbin/nologin app \
     && mkdir -p /storage /tmp/unoserver && chown -R app:app /storage /app /tmp/unoserver
 WORKDIR /app/backend
 USER app
 
 # HW-1: the render worker runs at a lower CPU priority than the interactive paths.
-ENTRYPOINT ["nice", "-n", "10", "/usr/local/bin/unoserver-entrypoint"]
+#
+# The warm unoserver/`unoserver-entrypoint` path is not used: unoserver 3.x no
+# longer serves the multipart /request API this app's client calls, and it needs
+# Debian's python3-uno binding (system python 3.11) which the 3.12 image cannot
+# import. RB_PDF_BACKEND=soffice drives LibreOffice directly instead.
+ENTRYPOINT ["nice", "-n", "10"]
+CMD ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "render", \
+     "-c", "1", "-P", "prefork", "--prefetch-multiplier", "1", "-l", "INFO", "-n", "render@%h"]

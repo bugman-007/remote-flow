@@ -1,16 +1,26 @@
 # api / worker-llm / worker-ops share this image (§3.2).
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    RB_PDF_BACKEND=unoserver
+    RB_PDF_BACKEND=soffice
 
 WORKDIR /app
 
+# LibreOffice lives in this image too: the Manager's prompt test renders a PDF in
+# the API process, and the render stage falls back to a cold soffice.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && apt-get install -y --no-install-recommends \
+        curl ca-certificates \
+        libreoffice-writer-nogui libreoffice-core-nogui \
+        fontconfig \
+        fonts-crosextra-carlito fonts-crosextra-caladea \
+        fonts-liberation fonts-liberation2 fonts-dejavu fonts-noto-core \
     && rm -rf /var/lib/apt/lists/*
+
+COPY deploy/fonts/local.conf /etc/fonts/local.conf
+RUN fc-cache -f
 
 COPY backend/requirements.txt backend/requirements-llm.txt ./
 RUN pip install --upgrade pip \

@@ -14,7 +14,12 @@ settings = get_settings()
 
 broker_url = settings.redis_url or os.environ.get("CELERY_BROKER_URL") or "memory://"
 
-celery_app = Celery("remote_flow", broker=broker_url)
+#: Task modules the worker must import at boot. Without this the consumer starts
+#: with an empty registry, so every message it receives is acknowledged and
+#: discarded ("Received unregistered task"), leaving generations queued forever.
+TASK_MODULES = ("app.workers.tasks",)
+
+celery_app = Celery("remote_flow", broker=broker_url, include=list(TASK_MODULES))
 celery_app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,

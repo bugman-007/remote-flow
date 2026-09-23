@@ -73,9 +73,6 @@ def upgrade() -> None:
     sa.Column('id', app.models.GUID(length=36), nullable=False),
     sa.Column('created_at', app.models.DateTimeTZ(), nullable=False),
     sa.Column('updated_at', app.models.DateTimeTZ(), nullable=False),
-    sa.ForeignKeyConstraint(['active_prompt_version_id'], ['prompt_versions.id'], ),
-    sa.ForeignKeyConstraint(['provider_id'], ['llm_providers.id'], ),
-    sa.ForeignKeyConstraint(['theme_id'], ['themes.id'], ),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('name')
     )
@@ -88,8 +85,6 @@ def upgrade() -> None:
     sa.Column('id', app.models.GUID(length=36), nullable=False),
     sa.Column('created_at', app.models.DateTimeTZ(), nullable=False),
     sa.Column('updated_at', app.models.DateTimeTZ(), nullable=False),
-    sa.ForeignKeyConstraint(['created_by'], ['users.id'], ),
-    sa.ForeignKeyConstraint(['profile_id'], ['profiles.id'], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('profile_id', 'version_no', name='uq_prompt_version')
     )
@@ -155,7 +150,6 @@ def upgrade() -> None:
     sa.Column('id', app.models.GUID(length=36), nullable=False),
     sa.Column('created_at', app.models.DateTimeTZ(), nullable=False),
     sa.Column('updated_at', app.models.DateTimeTZ(), nullable=False),
-    sa.ForeignKeyConstraint(['actor_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_audit_log_action'), 'audit_log', ['action'], unique=False)
@@ -173,7 +167,6 @@ def upgrade() -> None:
     sa.Column('id', app.models.GUID(length=36), nullable=False),
     sa.Column('created_at', app.models.DateTimeTZ(), nullable=False),
     sa.Column('updated_at', app.models.DateTimeTZ(), nullable=False),
-    sa.ForeignKeyConstraint(['maker_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('maker_id', 'date', name='uq_daily_maker_stat')
     )
@@ -186,7 +179,6 @@ def upgrade() -> None:
     sa.Column('id', app.models.GUID(length=36), nullable=False),
     sa.Column('created_at', app.models.DateTimeTZ(), nullable=False),
     sa.Column('updated_at', app.models.DateTimeTZ(), nullable=False),
-    sa.ForeignKeyConstraint(['created_by'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_table('jobs',
@@ -209,10 +201,6 @@ def upgrade() -> None:
     sa.Column('id', app.models.GUID(length=36), nullable=False),
     sa.Column('created_at', app.models.DateTimeTZ(), nullable=False),
     sa.Column('updated_at', app.models.DateTimeTZ(), nullable=False),
-    sa.ForeignKeyConstraint(['duplicate_of'], ['jobs.id'], ),
-    sa.ForeignKeyConstraint(['maker_id'], ['users.id'], ),
-    sa.ForeignKeyConstraint(['profile_id'], ['profiles.id'], ),
-    sa.ForeignKeyConstraint(['skipped_by'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('maker_id', 'idempotency_key', name='uq_jobs_idempotency'),
     sa.UniqueConstraint('maker_id', 'submitted_date', 'seq_no', name='uq_jobs_ordering_key')
@@ -231,9 +219,6 @@ def upgrade() -> None:
     sa.Column('id', app.models.GUID(length=36), nullable=False),
     sa.Column('created_at', app.models.DateTimeTZ(), nullable=False),
     sa.Column('updated_at', app.models.DateTimeTZ(), nullable=False),
-    sa.ForeignKeyConstraint(['assigned_by'], ['users.id'], ),
-    sa.ForeignKeyConstraint(['maker_id'], ['users.id'], ),
-    sa.ForeignKeyConstraint(['profile_id'], ['profiles.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index('ix_profile_assignments_active_maker', 'profile_assignments', ['maker_id'], unique=True, postgresql_where=sa.text('ended_at IS NULL'), sqlite_where=sa.text('ended_at IS NULL'))
@@ -250,7 +235,6 @@ def upgrade() -> None:
     sa.Column('id', app.models.GUID(length=36), nullable=False),
     sa.Column('created_at', app.models.DateTimeTZ(), nullable=False),
     sa.Column('updated_at', app.models.DateTimeTZ(), nullable=False),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('token_hash')
     )
@@ -263,7 +247,6 @@ def upgrade() -> None:
     sa.Column('id', app.models.GUID(length=36), nullable=False),
     sa.Column('created_at', app.models.DateTimeTZ(), nullable=False),
     sa.Column('updated_at', app.models.DateTimeTZ(), nullable=False),
-    sa.ForeignKeyConstraint(['updated_by'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_settings_key'), 'settings', ['key'], unique=True)
@@ -286,9 +269,6 @@ def upgrade() -> None:
     sa.Column('id', app.models.GUID(length=36), nullable=False),
     sa.Column('created_at', app.models.DateTimeTZ(), nullable=False),
     sa.Column('updated_at', app.models.DateTimeTZ(), nullable=False),
-    sa.ForeignKeyConstraint(['job_id'], ['jobs.id'], ),
-    sa.ForeignKeyConstraint(['renamed_by'], ['users.id'], ),
-    sa.ForeignKeyConstraint(['selected_by'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('job_id')
     )
@@ -325,11 +305,6 @@ def upgrade() -> None:
     sa.Column('id', app.models.GUID(length=36), nullable=False),
     sa.Column('created_at', app.models.DateTimeTZ(), nullable=False),
     sa.Column('updated_at', app.models.DateTimeTZ(), nullable=False),
-    sa.ForeignKeyConstraint(['created_by'], ['users.id'], ),
-    sa.ForeignKeyConstraint(['job_id'], ['jobs.id'], ),
-    sa.ForeignKeyConstraint(['prompt_version_id'], ['prompt_versions.id'], ),
-    sa.ForeignKeyConstraint(['provider_id'], ['llm_providers.id'], ),
-    sa.ForeignKeyConstraint(['theme_id'], ['themes.id'], ),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('job_id', 'generation_no', name='uq_generation_no')
     )
@@ -351,8 +326,6 @@ def upgrade() -> None:
     sa.Column('id', app.models.GUID(length=36), nullable=False),
     sa.Column('created_at', app.models.DateTimeTZ(), nullable=False),
     sa.Column('updated_at', app.models.DateTimeTZ(), nullable=False),
-    sa.ForeignKeyConstraint(['doc_set_id'], ['doc_sets.id'], ),
-    sa.ForeignKeyConstraint(['generation_id'], ['generations.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_files_doc_set_id'), 'files', ['doc_set_id'], unique=False)
@@ -379,8 +352,6 @@ def upgrade() -> None:
     sa.Column('id', app.models.GUID(length=36), nullable=False),
     sa.Column('created_at', app.models.DateTimeTZ(), nullable=False),
     sa.Column('updated_at', app.models.DateTimeTZ(), nullable=False),
-    sa.ForeignKeyConstraint(['generation_id'], ['generations.id'], ),
-    sa.ForeignKeyConstraint(['provider_id'], ['llm_providers.id'], ),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('generation_id', 'stage', 'attempt_no', name='uq_attempt_no')
     )
@@ -401,11 +372,6 @@ def upgrade() -> None:
     sa.Column('id', app.models.GUID(length=36), nullable=False),
     sa.Column('created_at', app.models.DateTimeTZ(), nullable=False),
     sa.Column('updated_at', app.models.DateTimeTZ(), nullable=False),
-    sa.ForeignKeyConstraint(['created_by'], ['users.id'], ),
-    sa.ForeignKeyConstraint(['doc_set_id'], ['doc_sets.id'], ),
-    sa.ForeignKeyConstraint(['generation_id'], ['generations.id'], ),
-    sa.ForeignKeyConstraint(['reviewer_id'], ['users.id'], ),
-    sa.ForeignKeyConstraint(['template_id'], ['interview_templates.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_interviews_doc_set_id'), 'interviews', ['doc_set_id'], unique=False)
@@ -425,8 +391,6 @@ def upgrade() -> None:
     sa.Column('id', app.models.GUID(length=36), nullable=False),
     sa.Column('created_at', app.models.DateTimeTZ(), nullable=False),
     sa.Column('updated_at', app.models.DateTimeTZ(), nullable=False),
-    sa.ForeignKeyConstraint(['generation_id'], ['generations.id'], ),
-    sa.ForeignKeyConstraint(['job_id'], ['jobs.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_pipeline_events_generation_id'), 'pipeline_events', ['generation_id'], unique=False)
@@ -443,8 +407,6 @@ def upgrade() -> None:
     sa.Column('id', app.models.GUID(length=36), nullable=False),
     sa.Column('created_at', app.models.DateTimeTZ(), nullable=False),
     sa.Column('updated_at', app.models.DateTimeTZ(), nullable=False),
-    sa.ForeignKeyConstraint(['author_id'], ['users.id'], ),
-    sa.ForeignKeyConstraint(['interview_id'], ['interviews.id'], ),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('interview_id', 'version_no', name='uq_feedback_version')
     )
@@ -458,11 +420,53 @@ def upgrade() -> None:
     sa.Column('id', app.models.GUID(length=36), nullable=False),
     sa.Column('created_at', app.models.DateTimeTZ(), nullable=False),
     sa.Column('updated_at', app.models.DateTimeTZ(), nullable=False),
-    sa.ForeignKeyConstraint(['actor_id'], ['users.id'], ),
-    sa.ForeignKeyConstraint(['interview_id'], ['interviews.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_interview_events_interview_id'), 'interview_events', ['interview_id'], unique=False)
+
+    # Foreign keys are added once every table exists: SQLite tolerates a
+    # forward reference inside CREATE TABLE, Postgres does not, and
+    # profiles <-> prompt_versions is a cycle no ordering could satisfy.
+    op.create_foreign_key('profiles_active_prompt_version_id_fkey', 'profiles', 'prompt_versions', ['active_prompt_version_id'], ['id'])
+    op.create_foreign_key('profiles_provider_id_fkey', 'profiles', 'llm_providers', ['provider_id'], ['id'])
+    op.create_foreign_key('profiles_theme_id_fkey', 'profiles', 'themes', ['theme_id'], ['id'])
+    op.create_foreign_key('prompt_versions_created_by_fkey', 'prompt_versions', 'users', ['created_by'], ['id'])
+    op.create_foreign_key('prompt_versions_profile_id_fkey', 'prompt_versions', 'profiles', ['profile_id'], ['id'], ondelete='CASCADE')
+    op.create_foreign_key('audit_log_actor_id_fkey', 'audit_log', 'users', ['actor_id'], ['id'])
+    op.create_foreign_key('daily_maker_stats_maker_id_fkey', 'daily_maker_stats', 'users', ['maker_id'], ['id'])
+    op.create_foreign_key('interview_templates_created_by_fkey', 'interview_templates', 'users', ['created_by'], ['id'])
+    op.create_foreign_key('jobs_duplicate_of_fkey', 'jobs', 'jobs', ['duplicate_of'], ['id'])
+    op.create_foreign_key('jobs_maker_id_fkey', 'jobs', 'users', ['maker_id'], ['id'])
+    op.create_foreign_key('jobs_profile_id_fkey', 'jobs', 'profiles', ['profile_id'], ['id'])
+    op.create_foreign_key('jobs_skipped_by_fkey', 'jobs', 'users', ['skipped_by'], ['id'])
+    op.create_foreign_key('profile_assignments_assigned_by_fkey', 'profile_assignments', 'users', ['assigned_by'], ['id'])
+    op.create_foreign_key('profile_assignments_maker_id_fkey', 'profile_assignments', 'users', ['maker_id'], ['id'])
+    op.create_foreign_key('profile_assignments_profile_id_fkey', 'profile_assignments', 'profiles', ['profile_id'], ['id'])
+    op.create_foreign_key('refresh_tokens_user_id_fkey', 'refresh_tokens', 'users', ['user_id'], ['id'], ondelete='CASCADE')
+    op.create_foreign_key('settings_updated_by_fkey', 'settings', 'users', ['updated_by'], ['id'])
+    op.create_foreign_key('doc_sets_job_id_fkey', 'doc_sets', 'jobs', ['job_id'], ['id'])
+    op.create_foreign_key('doc_sets_renamed_by_fkey', 'doc_sets', 'users', ['renamed_by'], ['id'])
+    op.create_foreign_key('doc_sets_selected_by_fkey', 'doc_sets', 'users', ['selected_by'], ['id'])
+    op.create_foreign_key('generations_created_by_fkey', 'generations', 'users', ['created_by'], ['id'])
+    op.create_foreign_key('generations_job_id_fkey', 'generations', 'jobs', ['job_id'], ['id'])
+    op.create_foreign_key('generations_prompt_version_id_fkey', 'generations', 'prompt_versions', ['prompt_version_id'], ['id'])
+    op.create_foreign_key('generations_provider_id_fkey', 'generations', 'llm_providers', ['provider_id'], ['id'])
+    op.create_foreign_key('generations_theme_id_fkey', 'generations', 'themes', ['theme_id'], ['id'])
+    op.create_foreign_key('files_doc_set_id_fkey', 'files', 'doc_sets', ['doc_set_id'], ['id'])
+    op.create_foreign_key('files_generation_id_fkey', 'files', 'generations', ['generation_id'], ['id'])
+    op.create_foreign_key('generation_attempts_generation_id_fkey', 'generation_attempts', 'generations', ['generation_id'], ['id'])
+    op.create_foreign_key('generation_attempts_provider_id_fkey', 'generation_attempts', 'llm_providers', ['provider_id'], ['id'])
+    op.create_foreign_key('interviews_created_by_fkey', 'interviews', 'users', ['created_by'], ['id'])
+    op.create_foreign_key('interviews_doc_set_id_fkey', 'interviews', 'doc_sets', ['doc_set_id'], ['id'])
+    op.create_foreign_key('interviews_generation_id_fkey', 'interviews', 'generations', ['generation_id'], ['id'])
+    op.create_foreign_key('interviews_reviewer_id_fkey', 'interviews', 'users', ['reviewer_id'], ['id'])
+    op.create_foreign_key('interviews_template_id_fkey', 'interviews', 'interview_templates', ['template_id'], ['id'])
+    op.create_foreign_key('pipeline_events_generation_id_fkey', 'pipeline_events', 'generations', ['generation_id'], ['id'])
+    op.create_foreign_key('pipeline_events_job_id_fkey', 'pipeline_events', 'jobs', ['job_id'], ['id'])
+    op.create_foreign_key('feedback_author_id_fkey', 'feedback', 'users', ['author_id'], ['id'])
+    op.create_foreign_key('feedback_interview_id_fkey', 'feedback', 'interviews', ['interview_id'], ['id'])
+    op.create_foreign_key('interview_events_actor_id_fkey', 'interview_events', 'users', ['actor_id'], ['id'])
+    op.create_foreign_key('interview_events_interview_id_fkey', 'interview_events', 'interviews', ['interview_id'], ['id'])
     # ### end Alembic commands ###
 
 

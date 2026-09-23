@@ -77,8 +77,11 @@ services:
     <<: *backend-base
     environment:
       <<: *backend-env
-    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "llm", "-c", "${LLM_CONCURRENCY:-16}", "-P", "gevent", "--prefetch-multiplier", "1", "-l", "INFO", "-n", "llm@%h"]
-    mem_limit: 512m
+    # prefork, never gevent: every task drives its own asyncio event loop
+    # (app.workers.runtime), and gevent's monkey-patched selectors make those
+    # loops hang, so the worker acks the message without ever running it.
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "llm", "-c", "${LLM_CONCURRENCY:-4}", "-P", "prefork", "--prefetch-multiplier", "1", "-l", "INFO", "-n", "llm@%h"]
+    mem_limit: 1536m
     cpu_shares: 512
     stop_grace_period: 620s
 
@@ -111,8 +114,8 @@ services:
     <<: *backend-base
     environment:
       <<: *backend-env
-    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "ops", "-c", "2", "-P", "gevent", "-B", "-l", "INFO", "-n", "ops@%h"]
-    mem_limit: 192m
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "ops", "-c", "1", "-B", "-l", "INFO", "-n", "ops@%h"]
+    mem_limit: 256m
     cpu_shares: 512
     stop_grace_period: 60s
 
