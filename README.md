@@ -63,6 +63,15 @@ Redis the API still works — the broker falls back to in-process fan-out and
 Useful make targets: `setup`, `migrate`, `seed`, `dev`, `dev-web`, `dev-workers`,
 `test`, `lint`, `chaos`, `bench`, `build`, `up`, `down`, `logs`, `backup`.
 
+### PDF rendering
+
+DOCX generation is pure Python; the PDF comes from LibreOffice. Install it
+(`sudo apt-get install -y --no-install-recommends libreoffice-writer`) and the
+renderer uses a running `unoserver` when there is one, otherwise it falls back
+to a cold `soffice --headless`. `RB_PDF_BACKEND=stub` writes a placeholder PDF
+instead — documents then look empty/broken, so it is for dev boxes without
+LibreOffice (and the test suite) only, never for production.
+
 ## How the pipeline works
 
 1. **Intake (PIPE-11).** `POST /api/v1/jobs` validates the JD, enforces the

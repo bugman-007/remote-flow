@@ -226,6 +226,35 @@ def inject_job_description(data: dict, jd_text: str) -> dict:
     return out
 
 
+def truncation_error(provider: ProviderConfig, result: LLMResult, *, latency_ms: int = 0) -> LLMError:
+    """GEN-4: explain why a model produced no usable text.
+
+    Thinking models (``deepseek-*``, ``gemini-3.x-flash``) bill their hidden
+    reasoning against ``max_tokens``; a large Profile prompt can consume the whole
+    budget, so ``finish_reason`` is ``length`` and ``content`` comes back empty.
+    """
+    model = provider.model or "the model"
+    if result.finish_reason == "length":
+        code = "provider_output_truncated"
+        detail = (
+            f"{model} used the entire max_tokens budget ({provider.max_tokens}) before writing any answer "
+            f"(finish_reason=length)"
+        )
+    else:
+        code = "provider_empty_output"
+        detail = (
+            f"{model} returned an empty reply (finish_reason={result.finish_reason!r}, "
+            f"max_tokens={provider.max_tokens})"
+        )
+    return LLMError(
+        code,
+        f"{detail}. Thinking/reasoning models count their hidden reasoning against Max tokens, so a long "
+        "Profile prompt can leave no room for the answer. Pick a non-reasoning model (e.g. deepseek-chat, "
+        "gemini-2.5-flash) or raise Max tokens on the profile's Description tab.",
+        provider_error=True,
+    )
+
+
 async def generate_resume(
     client: LLMClient,
     *,
@@ -254,7 +283,13 @@ async def generate_resume(
         try:
             parsed = extract_json(result.raw)
         except LLMError as exc:
-            log.append({"round": round_no, "latency_ms": latency_ms, "error": exc.code, "repair": round_no < REPAIR_ROUNDS})
+            log.append({"round": round_no, "latency_ms": latency_ms, "error": exc.code,
+                        "finish_reason": result.finish_reason, "repair": round_no < REPAIR_ROUNDS})
+            # GEN-4: a reply cut off by the token limit, or an empty reply, cannot be
+            # fixed by asking again - fail fast with a code the operator can act on
+            # instead of looping until the attempt budget runs out.
+            if result.finish_reason == "length" or not (result.raw or "").strip():
+                raise truncation_error(provider, result, latency_ms=latency_ms) from exc
             if round_no >= REPAIR_ROUNDS:
                 raise LLMError("invalid_json", f"model did not return JSON after {REPAIR_ROUNDS + 1} attempts") from exc
             user = (

@@ -247,7 +247,11 @@ def build_blocks(data: dict) -> list[Block]:
     elif subtitle:
         blocks.append(_block("title", subtitle))
 
-    contact = [str(cleaned.get(key)).strip() for key in ("email", "phone", "location", "citizenship", "work_authorization")]
+    # Missing optional fields must not print as the literal string "None".
+    contact = [
+        str(cleaned.get(key) or "").strip()
+        for key in ("email", "phone", "location", "citizenship", "work_authorization")
+    ]
     contact = [item for item in contact if item]
     linkedin = str(cleaned.get("linkedin") or "").strip()
     if linkedin:
@@ -281,7 +285,7 @@ def build_blocks(data: dict) -> list[Block]:
                     align_right=str(job.get("dates") or "").strip() or None,
                 )
             )
-            meta = [str(job.get(key)).strip() for key in ("location",)]
+            meta = [str(job.get(key) or "").strip() for key in ("location",)]
             meta = [item for item in meta if item]
             if meta:
                 blocks.append(_block("meta", " · ".join(meta)))
