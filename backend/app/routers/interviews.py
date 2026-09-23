@@ -241,15 +241,27 @@ async def list_interviews(
         ).scalars().all()
         items = []
         for doc_set in rows:
-            job = await session.get(Job, doc_set.job_id)
+            job = await session.get(Job, doc_set.job_id) if doc_set.job_id else None
             maker = await session.get(User, job.maker_id) if job else None
+            profile = await session.get(Profile, job.profile_id) if job and job.profile_id else None
+            generation = await session.get(Generation, doc_set.current_generation_id) if doc_set.current_generation_id else None
+            files = (
+                await files_for_generation(session, doc_set.current_generation_id)
+                if doc_set.current_generation_id
+                else []
+            )
             items.append(
                 {
                     "doc_set_id": doc_set.id,
                     "company_name": doc_set.company_name,
                     "job_title": doc_set.job_title,
+                    "candidate_name": doc_set.candidate_name,
                     "maker_name": maker.name if maker else None,
                     "profile_id": job.profile_id if job else None,
+                    "profile_name": profile.name if profile else None,
+                    "submitted_date": job.submitted_date.isoformat() if job else None,
+                    "generation_no": generation.generation_no if generation else None,
+                    "file_count": len(files),
                     "selected_at": doc_set.selected_at,
                     "seq_no": job.seq_no if job else None,
                 }

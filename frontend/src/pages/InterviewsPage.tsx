@@ -10,7 +10,7 @@ import { Pager, Table, TableState } from "../ui/table";
 import { Tabs } from "../ui/tabs";
 import { useUrlState } from "../lib/useUrlState";
 import { cn } from "../lib/utils";
-import { formatDateTime, formatSeq, todayISO } from "../lib/format";
+import { formatDate, formatDateTime, formatSeq, todayISO } from "../lib/format";
 import { DateSelector } from "../components/DateSelector";
 import { InterviewDrawer } from "./interviews/InterviewDrawer";
 import { ScheduleDialog } from "./interviews/ScheduleDialog";
@@ -23,8 +23,13 @@ interface SelectedRow {
   doc_set_id: string;
   company_name: string | null;
   job_title: string | null;
+  candidate_name: string | null;
   maker_name: string | null;
   profile_id: string | null;
+  profile_name: string | null;
+  submitted_date: string | null;
+  generation_no: number | null;
+  file_count: number;
   selected_at: string | null;
   seq_no: number | null;
 }
@@ -463,9 +468,15 @@ function SelectedDocSets({ onSchedule }: { onSchedule: (docSetId: string) => voi
       <Table>
         <thead>
           <tr>
+            <th>{t("resumes.columns.seq")}</th>
             <th>{t("resumes.columns.company")}</th>
             <th>{t("resumes.columns.title")}</th>
+            <th>{t("interviews.candidateName")}</th>
             <th>{t("resumes.columns.maker")}</th>
+            <th>{t("users.profile")}</th>
+            <th>{t("resumes.columns.submitted")}</th>
+            <th>{t("resumes.columns.generation")}</th>
+            <th>{t("resumes.columns.files")}</th>
             <th>{t("interviews.selectedDate")}</th>
             <th />
           </tr>
@@ -473,11 +484,15 @@ function SelectedDocSets({ onSchedule }: { onSchedule: (docSetId: string) => voi
         <tbody>
           {rows.map((row) => (
             <tr key={row.doc_set_id}>
-              <td className="font-medium">
-                {formatSeq(row.seq_no)} · {row.company_name ?? "—"}
-              </td>
+              <td className="font-mono text-xs">{formatSeq(row.seq_no)}</td>
+              <td className="font-medium">{row.company_name ?? "—"}</td>
               <td>{row.job_title ?? "—"}</td>
+              <td>{row.candidate_name ?? "—"}</td>
               <td>{row.maker_name ?? "—"}</td>
+              <td>{row.profile_name ?? "—"}</td>
+              <td className="text-xs">{formatDate(row.submitted_date)}</td>
+              <td className="text-xs">{row.generation_no ?? "—"}</td>
+              <td className="text-xs">{row.file_count}</td>
               <td className="text-xs">{formatDateTime(row.selected_at)}</td>
               <td className="text-right">
                 <Button size="sm" onClick={() => onSchedule(row.doc_set_id)}>
