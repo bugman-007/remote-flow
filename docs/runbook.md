@@ -33,7 +33,7 @@ python manage.py release-scan       # ORD-8: release ready cursors after a crash
 python manage.py dispatch-sweep     # re-enqueue work the queue may have lost
 python manage.py expire-leases      # fail expired leases and apply retry policy
 python manage.py retention          # expire files per STO-4 (dry run: Settings UI)
-python manage.py backup | restore   # see §12
+python manage.py backup | restore   # see §14
 python manage.py rotate-master-key --new-key "$(openssl rand -base64 32)"
 python manage.py chaos-run          # OPS-7 smoke test with injected failures
 ```
@@ -130,7 +130,7 @@ the attempt timeline, `worker-render` container RSS climbing, PDFs missing.
    the cold fallback uses a private `-env:UserInstallation` profile, so this
    should be self-healing; if not, remove `/tmp/.X*-lock` inside the container.
 4. If the render queue is the bottleneck at normal load (compare
-   `docs/benchmarks.md` p95 with the LLM p95), add a second render box (§14)
+   `docs/benchmarks.md` p95 with the LLM p95), add a second render box (§16)
    instead of raising `RENDER_CONCURRENCY` — HW-1 keeps render at 1 per box.
 5. A single pathological DOCX that always times out: Skip the job, then ask the
    Maker to resubmit with a leaner theme (or fix the Profile). The JSON is
@@ -179,6 +179,10 @@ The mechanics:
   demand and an idle box keeps only MIN. The controller moves that range at
   runtime with `app.control.autoscale()`; `pool_grow`/`pool_shrink` are not
   available on an autoscaled worker.
+- The range is re-broadcast at least once a minute even when nothing changed
+  (`PUBLISH_KEEPALIVE_S`). A restarted worker comes back on the `--autoscale`
+  range from its own command line, so without the keepalive it would keep
+  running a range nobody asked for.
 - **Releasing is job-safe by construction.** The controller only ever lowers
   the ceiling to the number of calls it can see running, and billiard's
   `Pool.shrink` in turn only terminates children with no active job - it raises
@@ -190,6 +194,15 @@ The mechanics:
   put back to `pending` **without spending an attempt** - "no capacity" is not a
   failure. The controller's own 10 s tick ends with a sweep, so a slot that has
   just opened is filled immediately instead of waiting for the 30 s sweep.
+
+Sizing: the LLM children cost ~270 MB each (measured), so `worker-llm`'s
+`mem_limit` is 3072 MB - enough for the setting's maximum of 10. A container that
+hits its own limit gets children OOM-killed and the provider calls in flight are
+lost, so the memory-driven controller (host thresholds), not the cgroup, should be
+what stops the growth. Two further ceilings apply: the provider's
+`max_concurrency` in Settings -> LLM Providers caps *simultaneous calls* (both
+providers on this server are 8, so processors past 8 just wait), and
+`LLM_POOL_MAX`/`LLM_POOL_MIN` in `deploy/.env` are only the worker's boot range.
 
 Symptoms and fixes:
 
@@ -204,7 +217,45 @@ Symptoms and fixes:
 (`app.workers.tasks.pool_tick`) and Settings → Processors → **Apply now** runs
 one cycle immediately.
 
-## 7. Stuck leases
+## 7. Cancelling a Maker's submission
+
+A Maker can withdraw a submission from the JD Upload page while it is still in
+flight (the cancel action on each *Recent submissions* row, `POST
+/jobs/{id}/cancel`).
+
+- The job becomes `skipped` so the Maker's delivery cursor moves past it - a
+  withdrawn job must never block the submissions behind it - and the row reads
+  **Cancelled** (a Manager's skip keeps saying **Skipped**).
+- Every unfinished build of that job is marked `cancelled` and loses its lease.
+  A provider call that is already on the wire cannot be aborted, so its result is
+  thrown away when it returns (`lease_update` no longer matches) and a *failing*
+  attempt afterwards cannot resurrect the build (`record_failure` re-reads the
+  status and supersedes). The slot a cancelled call holds stays busy until the
+  provider answers.
+- A delivered doc set cannot be withdrawn (409) - that is what permanent delete
+  (Managers, Resumes page) is for. The submission keeps its daily-limit count.
+- `job.cancel` is audited, and `pipeline_event` rows show `to_state=cancelled`.
+
+Two identities can be told apart later: `jobs.skipped_by` equal to `jobs.maker_id`
+means the Maker withdrew it; anything else is a Manager skip.
+
+## 8. Render concurrency (doc generator)
+
+`RENDER_CONCURRENCY` (default **2**) is how many DOCX-to-PDF conversions run at
+once on `worker-render`. Measured on the target box: p50 0.68 s, p95 0.78 s, one
+busy core and ~215 MB per conversion (docs/benchmarks.md).
+
+- Each conversion spawns its own `soffice` with a private `-env:UserInstallation`
+  profile, so concurrent conversions never share state.
+- Two children already saturate both cores, which is why the deploy ships 2 and
+  `worker-render` is nice-d at 10 with the lowest CPU share: a bulk render must
+  never starve the API. Raise the knob only with free cores; also raise the
+  service `mem_limit` (~215 MB per extra child).
+- The render stage is not what makes a batch slow: a complete doc set costs
+  ~0.7 s of render against 0.5-15 min of provider time, so the LLM pool
+  (see 6) is the throughput lever.
+
+## 9. Stuck leases
 
 A lease is a claim with an expiry (`lease_expires_at`). A killed worker never
 releases it explicitly, so the watchdog does:
@@ -219,7 +270,7 @@ If a build sits in `llm_running`/`rendering` with an expired lease and the
 watchdog is not running, check `worker-ops` logs and that Celery Beat is up
 (`-B` on the ops worker).
 
-## 8. Outbox backlog (events not reaching the browser)
+## 10. Outbox backlog (events not reaching the browser)
 
 The UI polls every 10 s as a fallback, so a backlog is a latency problem, not a
 data problem. Symptoms: System status → *outbox backlog* > 0, *relay lag* rising,
@@ -237,7 +288,7 @@ live updates only on refresh.
 4. Broker memory: Redis runs with `maxmemory-policy noeviction` (HW-6) and SSE
    streams are capped at 500 entries per user, so a backlog cannot grow forever.
 
-## 9. Disk thresholds and forced resume
+## 11. Disk thresholds and forced resume
 
 `worker-ops` evaluates disk usage on every retention sweep and on each System
 status refresh:
@@ -287,7 +338,7 @@ build is still running (`docset_in_flight`). Neither the retention window nor th
 daily stats are recalculated, so a purged submission leaves a gap in the Maker's
 `seq_no` sequence and stays counted in `daily_maker_stats`.
 
-## 10. Database and Redis
+## 12. Database and Redis
 
 - Postgres settings (HW-5) live in `deploy/postgresql.conf`
   (`shared_buffers=768MB`, `effective_cache_size=2GB`, `work_mem=8MB`,
@@ -303,7 +354,7 @@ daily stats are recalculated, so a purged submission leaves a gap in the Maker's
   boot; it is safe to run concurrently because it takes a Postgres advisory lock.
   Downgrade with `alembic downgrade -1` from `backend/` only if you know why.
 
-## 11. Deploys and upgrades
+## 13. Deploys and upgrades
 
 ```bash
 git pull
@@ -320,7 +371,7 @@ immutable-asset build, so open tabs pick up the new bundle on the next reload
 Rollback: `git checkout <previous-tag> && make build && docker compose up -d`
 plus `alembic downgrade` if the release included a migration.
 
-## 12. Backup and restore (NFR-6)
+## 14. Backup and restore (NFR-6)
 
 Backups: `deploy/backup.sh` writes `db.sql`, `storage.tar.gz` and a manifest to
 `/srv/remote-flow/backups/<stamp>` and prunes to 30 daily + 12 monthly. Schedule
@@ -343,7 +394,7 @@ Restore drill (do this in M4 and after any infra change):
 Point-in-time recovery is out of scope for v1; if it is needed, enable Postgres
 WAL archiving on the volume in addition to the nightly dump.
 
-## 13. Rotating the master key
+## 15. Rotating the master key
 
 ```bash
 # 1. New key, generated and stored off-box first.
@@ -358,7 +409,7 @@ docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d
 Verify afterwards: Settings → LLM Providers → *Test* on each provider returns
 OK. If a provider key was corrupted before the rotation, re-enter it.
 
-## 14. Adding a provider type / a second render box
+## 16. Adding a provider type / a second render box
 
 **Provider type.** The provider list is data-driven (`providers.type`);
 supported types come from the LLM client adapter (`app/services/llm.py`). To add
@@ -381,7 +432,7 @@ Postgres, Redis and the shared storage directory.
    oldest queued age in System status; both boxes draw from the same `render`
    queue, so no configuration change is needed on the API side.
 
-## 15. Routine checks
+## 17. Routine checks
 
 Daily (or let the nightly backup cron mail you):
 
@@ -403,7 +454,7 @@ Weekly:
 - Retention dry run; run it if the byte total is growing.
 - `python manage.py chaos-run --n 50` on a staging box after dependency updates.
 
-## 16. Incident checklist (first 5 minutes)
+## 18. Incident checklist (first 5 minutes)
 
 1. What is broken — API, one worker, PDFs only, or the UI? `docker compose ps`.
 2. `docker compose logs --since 15m <service>` for the failing service.

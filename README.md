@@ -115,7 +115,7 @@ Everything comes from environment variables (`backend/app/config.py`, sample in
 | `SECRET_KEY` | dev value | JWT signing; set a long random value in production |
 | `PUBLIC_URL` / `SITE_ADDRESS` / `COOKIE_SECURE` | localhost | CORS, Caddy site, cookie flags |
 | `LLM_POOL_MIN` / `LLM_POOL_MAX` | 2 / 8 | autoscale range for the llm worker (CONC-2); the Manager's Static/Dynamic setting moves it at runtime |
-| `RENDER_CONCURRENCY` | 1 | render worker sizing (HW-1) |
+| `RENDER_CONCURRENCY` | 2 | simultaneous DOCX→PDF conversions on `worker-render` (HW-1); each costs ~1 core and ~215 MB |
 | `MAX_LLM_ATTEMPTS` / `MAX_RENDER_ATTEMPTS` | 10 / 3 | retry budgets before `needs_attention` |
 | `MOCK_LLM_FAIL_RATE` / `MOCK_RENDER_FAIL_RATE` | 0 | failure injection for chaos runs (OPS-7) |
 | `AUTO_CREATE_SCHEMA` / `SEED_ON_START` | false | dev conveniences; production uses Alembic |

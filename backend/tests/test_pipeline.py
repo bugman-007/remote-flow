@@ -358,3 +358,35 @@ async def test_rate_limit_shrinks_provider_concurrency_for_a_minute(db_session, 
     assert pipeline.provider_slot_limit(provider, moment=now_ts) == max(1, int(base * 0.75))
     assert pipeline.provider_slot_limit(provider, moment=now_ts + 61) == base
     pipeline.reset_provider_throttles()
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawn_build_is_not_resurrected_when_the_attempt_then_fails(db_session, workspace, fast_settings):
+    """MKR-3: a cancel that lands mid-call wins over the attempt's failure path."""
+    client = FailingClient(code="provider_timeout")
+    set_client_override(client)
+    try:
+        job = await submit(db_session, workspace["maker"], "we are hiring a platform engineer at Company C to build backend services, remote")
+        generation = await initial_build(db_session, job)
+        await db_session.commit()
+
+        # The provider call is on the wire when the Maker withdraws.
+        claim = await pipeline.claim_build(db_session, generation.id, "llm", "worker-llm:test", timeout_s=60)
+        assert claim is not None
+        await db_session.commit()
+        await pipeline.cancel_job(db_session, job=job, actor_id=workspace["maker"].id)
+        await db_session.commit()
+
+        status = await pipeline.record_failure(
+            db_session, generation, claim, error_code="provider_timeout", error_message="timed out"
+        )
+        await db_session.commit()
+        await db_session.refresh(generation)
+        assert status == "cancelled"
+        assert generation.status == "cancelled", "a failed attempt must not bring the build back"
+        assert generation.next_retry_at is None
+        assert generation.lease_token is None
+        assert claim.attempt.outcome == "superseded"
+        assert client.calls == 0, "the client is never reached: the build was withdrawn first"
+    finally:
+        set_client_override(None)

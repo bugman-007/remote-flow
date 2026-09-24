@@ -36,6 +36,11 @@ def derived_status(
             "released_late": bool(job.released_late),
         }
     if job.delivery_status == "skipped":
+        # MKR-3: a Maker who withdrew their own submission sees "Cancelled"; a
+        # Manager's skip (ORD-5) keeps its own wording. Both leave the queue the
+        # same way, so the delivery state stays `skipped`.
+        if job.skipped_by and job.skipped_by == job.maker_id:
+            return {"status": "cancelled", "label": "Cancelled", "generation": 0, "stage": None, "attempt": None}
         return {"status": "skipped", "label": "Skipped", "generation": 0, "stage": None, "attempt": None}
 
     if initial is None:

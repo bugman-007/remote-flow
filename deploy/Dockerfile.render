@@ -52,5 +52,7 @@ USER app
 # Debian's python3-uno binding (system python 3.11) which the 3.12 image cannot
 # import. RB_PDF_BACKEND=soffice drives LibreOffice directly instead.
 ENTRYPOINT ["nice", "-n", "10"]
-CMD ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "render", \
-     "-c", "1", "-P", "prefork", "--prefetch-multiplier", "1", "-l", "INFO", "-n", "render@%h"]
+# RENDER_CONCURRENCY is the number of simultaneous DOCX -> PDF conversions; the
+# deploy overrides it (2 by default). Each one is a short-lived `soffice` child.
+CMD ["sh", "-c", "exec celery -A app.workers.celery_app.celery_app worker -Q render \
+     -c ${RENDER_CONCURRENCY:-1} -P prefork --prefetch-multiplier 1 -l INFO -n render@%h"]

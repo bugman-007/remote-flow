@@ -118,7 +118,7 @@ Rows marked **✔ confirmed** were approved by the owner. Others are proposals t
 | Job queue | **Celery** with **Redis** broker, queues `llm`, `render`, `ops`; priority enabled so **retries jump ahead** of fresh submissions; `acks_late`, `prefetch_multiplier=1`. The database, not the queue, is the source of truth. | A retried blocker must not queue behind 500 new JDs. | proposed |
 | PDF conversion | **LibreOffice headless** through a **warm `unoserver` per render process** (P0 on this hardware). The generator's Word-COM path stays available for the Windows GUI only. | Word COM cannot run on Ubuntu; DOCX stays the single source of truth; a cold `soffice` start per document costs CPU a 2-core box cannot spare. | proposed — needs owner sign-off on visual fidelity (12 #1) |
 | TXT file | `job_description.txt`, produced by the generator's `compose_job_info()` from `job_description`, `company_information`, `job_link`. The **system injects the original JD text** as `job_description`. | Matches the existing generator; saves output tokens and avoids the model truncating a long JD. | proposed |
-| Hardware | Target is the owner's **2 vCPU / 6 GB** Ubuntu server. Render concurrency starts at **1**; all numbers in §4.3/§8 are targets until the M0 benchmark replaces them. Scale-out path: a second render box. | | ✔ spec confirmed 2026-09-22; budget proposed |
+| Hardware | Target is the owner's **2 vCPU / 6 GB** Ubuntu server. Render concurrency is **2** (measured 2026-09-24: p50 0.68 s / p95 0.78 s per doc set, ~215 MB and one core each); §4.3/§8 targets that the M0 benchmark has not replaced stay targets. Scale-out path: a second render box. | | ✔ spec confirmed 2026-09-22; budget proposed |
 | First manager account | Created by a CLI command (`manage.py create-manager`) during deployment. | There is no sign-up. | proposed |
 
 ---
@@ -185,7 +185,7 @@ Navigation per role (sidebar):
 |---|---|---|---|---|
 | `caddy` | `deploy/Dockerfile.caddy` (multi-stage: node builds `frontend/`, assets copied into `caddy:2`) | TLS, static SPA, reverse proxy to `api` | — | 128 MB |
 | `api` | `backend/` | FastAPI (uvicorn) | 2 workers | 512 MB |
-| `worker-llm` | `backend/` | Celery worker, queue `llm`, gevent pool | 1 process × 16 greenlets | 512 MB |
+| `worker-llm` | `backend/` | Celery worker, queue `llm`, prefork pool | autoscaled 2–10 processes (Settings → Processors) | 3072 MB |
 | `worker-render` | `deploy/Dockerfile.render` (`backend/` + LibreOffice + fonts + `unoserver`) | Celery worker, queue `render`, prefork, `nice 10`; one warm `unoserver` per process | **1** process (raise to 2 only after the M0 benchmark shows API p95 unaffected) | 1.5 GB |
 | `worker-ops` | `backend/` | `celery worker -Q ops -B -c 2 -P gevent`: embedded Beat + executor for dispatch sweep, lease watchdog, release reconciliation, outbox relay, retention, disk check, stats | 2 greenlets, reserved for short tasks only | 192 MB |
 | `postgres` | postgres:16 | Database (`shared_buffers=768MB`, `max_connections=40`, `work_mem=8MB`) | — | 1.5 GB |
@@ -226,16 +226,16 @@ Owner's server (confirmed 2026-09-22): **2 vCPU, 6 GB RAM**, Ubuntu. Disk size u
 
 | Rule | Detail |
 |---|---|
-| **HW-1 (P0)** CPU priority | Interactive paths win: `cpu_shares` api 1024, postgres 1024, worker-llm 512, worker-ops 512, worker-render 256; the render process additionally runs under `nice -n 10`. Render concurrency defaults to 1. |
+| **HW-1 (P0)** CPU priority | Interactive paths win: `cpu_shares` api 1024, postgres 1024, worker-llm 512, worker-ops 512, worker-render 256; the render process additionally runs under `nice -n 10`. Render concurrency (`RENDER_CONCURRENCY`) is **2**: measured 0.68 s p50 / 0.78 s p95 per doc set, one busy core and ~215 MB each (docs/benchmarks.md, 2026-09-24). |
 | **HW-2 (P0)** Memory limits | Per-service limits as in §3.2; OOM-killing a worker is recoverable (leases expire, attempts are retried), OOM-killing Postgres is not, hence the headroom. |
 | **HW-3 (P0)** Swap | 2 GB swapfile, `vm.swappiness=10`, as a safety net for LibreOffice spikes — not as working memory. |
-| **HW-4 (P0)** LibreOffice hygiene | `unoserver` restarted every 200 conversions or when its RSS exceeds 700 MB (LibreOffice leaks); a conversion that exceeds 60 s kills and restarts it. |
+| **HW-4 (P0)** LibreOffice hygiene | For the long-lived `unoserver` backend: restart every 200 conversions or when its RSS exceeds 700 MB (LibreOffice leaks); a conversion that exceeds 60 s kills and restarts it. The deploy drives `soffice` directly instead - one short-lived process per conversion with its own throwaway `-env:UserInstallation` profile, so there is no process to leak. |
 | **HW-5 (P0)** Postgres | `shared_buffers=768MB`, `effective_cache_size=2GB`, `work_mem=8MB`, `max_connections=40` (api pool 10, each worker 5). |
 | **HW-6 (P0)** Redis | Broker data must never be evicted: `maxmemory-policy noeviction`; SSE replay streams capped at 500 entries per user; no result backend (results live in Postgres). |
 | **HW-7 (P0)** Benchmark first | M0 runs `manage.py bench-render --n 50` and `bench-intake` on this server and records p50/p95 render time, peak RSS and API p95 under load. The numbers in §4.3 and §8 are replaced by the measurements. |
 | **HW-8 (P1)** Scale-out | When measured render throughput is below the LLM throughput at peak, add a second box running only `worker-render` (shares Redis/Postgres/storage over the private network) rather than upgrading the main server. |
 
-Expected steady-state footprint: caddy 30 MB · api 250 MB · worker-llm 200 MB · worker-render 500–800 MB (Python + soffice) · worker-ops 100 MB · postgres ~1 GB · redis 100 MB ≈ **2.5–3 GB**, comfortable within 6 GB with the limits above.
+Expected footprint, measured 2026-09-24: caddy 32 MB · api 217 MB · worker-llm ~280 MB per autoscaled child (1.68 GB at 6 children) · worker-render 150 MB idle, ~430 MB with two conversions · worker-ops 130 MB · postgres ~185 MB · redis 5 MB. Six processors therefore sit around 2.8 GB total; the container limits (worker-llm 3072 MB, worker-render 1536 MB) leave the Controller's host-memory thresholds as the thing that actually bounds growth.
 
 ---
 
@@ -329,12 +329,12 @@ Worked example: a Maker submits #001…#100 five seconds apart. #001's LLM call 
 ### 4.4 Concurrency and throughput
 
 - **CONC-1 (P0)** Fresh builds are enqueued FIFO by ordering key at normal priority; retries and Manager "Retry now" use high priority (Celery `priority` on the Redis broker, `queue_order_strategy = priority`).
-- **CONC-2 (P0)** `worker-llm` runs an autoscaled process pool (default 2–8, I/O-bound calls), sized by either a **Static** count or a memory-driven **Dynamic** controller the Manager picks in Settings → Processors (Appendix C.3). `worker-render` runs **1** process on the target server (HW-1) with a warm `unoserver`. `worker-ops` runs only short maintenance tasks. Queues are independent so a backlog in one never starves another.
+- **CONC-2 (P0)** `worker-llm` runs an autoscaled process pool (default 2–8, I/O-bound calls), sized by either a **Static** count or a memory-driven **Dynamic** controller the Manager picks in Settings → Processors (Appendix C.3). `worker-render` runs **2** processes on the target server (HW-1), each spawning its own short-lived `soffice`. `worker-ops` runs only short maintenance tasks. Queues are independent so a backlog in one never starves another.
 - **CONC-3 (P0)** Each Provider has `max_concurrency` (default 8) and `requests_per_minute` (default 60) enforced with a Redis semaphore and token bucket. A task acquires its slot **before** claiming the build (PIPE-2) and waits in place (bounded, with jitter) rather than re-queuing.
 - **CONC-4 (P0)** HTTP 429 responses respect `Retry-After` and additionally reduce the provider's effective concurrency by 25% for 60 s (simple adaptive backoff).
 - **CONC-5 (P1)** Prompt caching is enabled when the provider supports it (e.g. Anthropic `cache_control` on the system prompt, OpenAI automatic). The long Profile prompt is placed first and unchanged; the JD goes last.
 - **CONC-6 (P0)** Token usage (input, cached input, output) and provider latency are stored per attempt for cost reporting.
-- **CONC-7 (P0) — Capacity model (targets until HW-7 measures them).** Wall-clock for a burst of *N* jobs ≈ `max(N·L/C_llm, N·R/C_render)` where *L* = mean LLM latency, *C_llm* = effective provider concurrency, *R* = mean render time, *C_render* = render concurrency. On the target server with R ≈ 1.5 s (to be measured) and C_render = 1, rendering handles ≈ 2,400 docs/hour, so bursts are **LLM-bound**: 200 jobs at L = 30 s, C_llm = 8 → ≈ 12.5 min; **5,000 jobs at the same rates → ≈ 5.2 hours** (≈ 1.3 h at C_llm = 32). Fast acceptance therefore does not mean fast completion: the provider tier and `max_concurrency` are the levers, and Makers are shown an estimate (JD-11). Intake target: ≥ 1,000 `POST /jobs`/min without errors, verified by `bench-intake`.
+- **CONC-7 (P0) — Capacity model (targets until HW-7 measures them).** Wall-clock for a burst of *N* jobs ≈ `max(N·L/C_llm, N·R/C_render)` where *L* = mean LLM latency, *C_llm* = effective provider concurrency, *R* = mean render time, *C_render* = render concurrency. On the target server R is measured at 0.68 s p50 / 0.78 s p95 per doc set (docs/benchmarks.md, 2026-09-24) with C_render = 2, so rendering handles ≈ 10,000 docs/hour and bursts are **LLM-bound**: 200 jobs at L = 30 s, C_llm = 8 → ≈ 12.5 min; **5,000 jobs at the same rates → ≈ 5.2 hours** (≈ 1.3 h at C_llm = 32). Fast acceptance therefore does not mean fast completion: the provider tier and `max_concurrency` are the levers, and Makers are shown an estimate (JD-11). Intake target: ≥ 1,000 `POST /jobs`/min without errors, verified by `bench-intake`.
 
 ### 4.5 LLM request contract
 
@@ -441,7 +441,7 @@ UI: email input, password input, buttons **Login** and **Login as admin**, inlin
 
 **Who:** maker only. **Route:** `/jd-upload`.
 
-UI: a large paste box (monospace, auto-grow, character counter), **Submit** button (also `Ctrl/Cmd+Enter`), a usage indicator "Today: 37 / 100", an estimate line (JD-11), and a **Recent submissions** panel (today's last 20, with seq no, company name once known, status chip).
+UI: a large paste box (monospace, auto-grow, character counter), **Submit** button (also `Ctrl/Cmd+Enter`), a usage indicator "Today: 37 / 100", an estimate line (JD-11), and a **Recent submissions** panel (today's last 20, with seq no, company name once known, status chip, and a cancel action while the submission is still in flight - JD-12).
 
 - **JD-1 (P0)** Submitting sends the text with a fresh `Idempotency-Key` (PIPE-11), returns `{job_id, seq_no}` within 300 ms p95, and the client **clears the box** and focuses it again so the next paste can start immediately. If the network drops after the request was sent, the client retries with the **same** key, so a double submission cannot occur.
 - **JD-2 (P0)** Submit is disabled while a request is in flight and re-enabled on response; rapid successive submissions (every 1–5 s) must never be dropped or merged.
@@ -454,6 +454,7 @@ UI: a large paste box (monospace, auto-grow, character counter), **Submit** butt
 - **JD-9 (P0)** Recent submissions update live through SSE (`job.status`, `job.released`).
 - **JD-10 (P2)** Bulk paste: detect a delimiter (`-----` on its own line) and offer "Split into N submissions".
 - **JD-11 (P1)** **Estimated completion**: "≈ 18 min until your latest submission is ready" computed from the Maker's queue position, current global queue depth and the rolling mean LLM latency / effective provider concurrency (CONC-7). Shown on JD Upload and Resumes; labelled as an estimate.
+- **JD-12 (P0)** **Cancel a submission** while it is still in flight (`POST /jobs/{id}/cancel`): the button sits on each Recent-submissions row until the doc set is delivered (a `released`, `skipped` or already-cancelled job answers 409). Cancelling stops every unfinished build of that job, drops the queue cursor past it - so a withdrawn job never blocks the submissions behind it - and the row then reads **Cancelled**. A build whose provider call is already on the wire cannot be aborted, so its result is discarded (the lease no longer matches) and a failing attempt afterwards never resurrects it. The submission keeps its daily-limit count (same rule as JD-4), and Managers still see it under **Skipped**.
 
 ### 5.3 Resumes page
 

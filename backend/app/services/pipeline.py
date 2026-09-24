@@ -101,6 +101,12 @@ def actionable_statuses(stage: str) -> tuple[str, ...]:
     return ("queued", "retry_wait") if stage == "llm" else ("rendering", "retry_wait")
 
 
+#: A Maker withdrawal stops everything that has not finished yet. A ``ready``
+#: build is deliberately left alone: the work is done, and a Manager can still
+#: release it late (ORD-9) instead of throwing the doc set away.
+CANCELLABLE_STATUSES = ("queued", "llm_running", "rendering", "retry_wait", "needs_attention")
+
+
 def running_status(stage: str) -> str:
     return "llm_running" if stage == "llm" else "rendering"
 
@@ -232,6 +238,14 @@ def backoff_seconds(stage: str, attempt_no: int, *, retry_after_s: int | None = 
     return int(delay * RETRY_BACKOFF_SCALE)
 
 
+async def _is_cancelled(session: AsyncSession, generation: Generation) -> bool:
+    """Has this build been withdrawn since the attempt was claimed?"""
+    status = (
+        await session.execute(select(Generation.status).where(Generation.id == generation.id))
+    ).scalar_one_or_none()
+    return status == "cancelled"
+
+
 async def record_failure(
     session: AsyncSession,
     generation: Generation,
@@ -251,6 +265,17 @@ async def record_failure(
         # The build leaves the LLM queue either way: terminal, or re-dispatched
         # later (which marks it in flight again).
         await pool.clear_inflight(get_broker(), generation.id)
+    if await _is_cancelled(session, generation):
+        # The Maker withdrew the submission (or a Manager skipped it) while this
+        # attempt was on the provider: the cancellation stands, an attempt that
+        # failed afterwards must not bring the build back as a retry. The status
+        # is re-read here because sessions run with ``expire_on_commit=False``,
+        # so the object loaded before the provider call is stale by now.
+        generation.status = "cancelled"
+        claim.attempt.outcome = "superseded"
+        claim.attempt.finished_at = moment
+        await session.flush()
+        return "cancelled"
     claim.attempt.outcome = "timed_out" if timed_out else "failed"
     claim.attempt.finished_at = moment
     claim.attempt.error_code = error_code
@@ -989,6 +1014,81 @@ async def skip_job(session: AsyncSession, *, job: Job, actor_id: str | None) -> 
     )
     await session.flush()
     await release.release_pass(session, job.maker_id, actor="skip")
+
+
+async def cancel_job(
+    session: AsyncSession, *, job: Job, actor_id: str | None, reason: str | None = None
+) -> Generation | None:
+    """Withdraw a submission that has not been delivered yet (MKR-3).
+
+    A provider call already on the wire cannot be aborted, so the build is marked
+    ``cancelled`` and its lease is dropped instead: when the worker comes back,
+    ``lease_update`` no longer matches, the attempt is superseded and nothing is
+    rendered or released. The job itself becomes ``skipped`` - that is what moves
+    the Maker's delivery cursor past it, and without it a withdrawn job would
+    block every later submission for that Maker.
+    """
+    if job.delivery_status == "released":
+        raise ValueError("a delivered doc set cannot be cancelled")
+    if job.delivery_status == "skipped":
+        raise ValueError("this submission has already been cancelled")
+    broker = get_broker()
+    generations = (
+        await session.execute(select(Generation).where(Generation.job_id == job.id))
+    ).scalars().all()
+    stopped: list[Generation] = []
+    for generation in generations:
+        if generation.status not in CANCELLABLE_STATUSES:
+            continue
+        generation.status = "cancelled"
+        generation.lease_token = None
+        generation.lease_expires_at = None
+        generation.claimed_by = None
+        generation.next_retry_at = None
+        stopped.append(generation)
+        await pool.clear_inflight(broker, generation.id)
+        await events.emit(
+            session,
+            audience=events.job_audience(job.maker_id),
+            event_type="job.status",
+            payload={
+                "job_id": job.id,
+                "generation_id": generation.id,
+                "generation_no": generation.generation_no,
+                "status": "cancelled",
+            },
+            job_id=job.id,
+            generation_id=generation.id,
+            pipeline_event={
+                "from_state": None,
+                "to_state": "cancelled",
+                "stage": generation.stage,
+                "actor": actor_id or "maker",
+                "details": {"reason": reason} if reason else {},
+            },
+        )
+    initial = await release.initial_generation(session, job)
+    job.delivery_status = "skipped"
+    job.skipped_at = now()
+    job.skipped_by = actor_id
+    await events.emit(
+        session,
+        audience=events.job_audience(job.maker_id),
+        event_type="job.status",
+        payload={"job_id": job.id, "seq_no": job.seq_no, "status": "cancelled"},
+        job_id=job.id,
+        generation_id=initial.id if initial else None,
+        pipeline_event={
+            "from_state": "pending",
+            "to_state": "cancelled",
+            "stage": "cancel",
+            "actor": actor_id or "maker",
+            "details": {"stopped": len(stopped), "reason": reason} if reason else {"stopped": len(stopped)},
+        },
+    )
+    await session.flush()
+    await release.release_pass(session, job.maker_id, actor="cancel")
+    return initial
 
 
 async def cancel_generation(session: AsyncSession, *, generation: Generation, actor_id: str | None) -> None:

@@ -1598,3 +1598,69 @@ async def test_pool_status_and_manual_tick_are_available_to_managers(api, worksp
     maker = await api.login("maker@example.com", workspace["password"])
     forbidden = await maker.get("/api/v1/system/pool")
     assert forbidden.status_code == 403, forbidden.text
+
+
+@pytest.mark.asyncio
+async def test_a_maker_can_withdraw_a_submission_before_it_is_delivered(api, workspace, db_session):
+    """MKR-3: cancel is ordered-safe and never resurrects the build."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    created = await submit_via_api(maker)
+    job_id = created["job_id"]
+
+    cancelled = await maker.post(f"/api/v1/jobs/{job_id}/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+
+    job = (await db_session.execute(select(Job).where(Job.id == job_id))).scalar_one()
+    assert job.delivery_status == "skipped"
+    assert job.skipped_by == workspace["maker"].id
+    generation = (
+        await db_session.execute(select(Generation).where(Generation.job_id == job_id))
+    ).scalars().one()
+    assert generation.status == "cancelled"
+    assert generation.lease_token is None and generation.claimed_by is None
+
+    # The Maker sees "Cancelled" (a Manager skip keeps saying "Skipped").
+    listing = await maker.get("/api/v1/jobs", params={"date": date.today().isoformat()})
+    row = listing.json()["items"][0]
+    assert row["status"]["status"] == "cancelled"
+    assert row["status"]["label"] == "Cancelled"
+
+    # Cancelling twice, or after delivery, is a conflict rather than a silent no-op.
+    assert (await maker.post(f"/api/v1/jobs/{job_id}/cancel")).status_code == 409
+
+    # Nothing the pipeline does afterwards may bring the build back.
+    await run_pipeline()
+    await db_session.refresh(generation)
+    assert generation.status == "cancelled"
+    assert (await maker.get("/api/v1/jobs", params={"date": date.today().isoformat()})).json()["items"][0][
+        "status"
+    ]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_a_submission_is_owner_scoped(api, workspace, fresh_client):
+    """A Maker only cancels their own; Managers may cancel any; Reviewers may not."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    other = await fresh_client("maker2@example.com", workspace["password"])
+    reviewer = await fresh_client("reviewer@example.com", workspace["password"])
+    manager = await fresh_client("manager@example.com", workspace["password"])
+
+    created = await submit_via_api(maker)
+    job_id = created["job_id"]
+
+    assert (await other.post(f"/api/v1/jobs/{job_id}/cancel")).status_code == 404
+    assert (await reviewer.post(f"/api/v1/jobs/{job_id}/cancel")).status_code == 403
+
+    cancelled = await manager.post(f"/api/v1/jobs/{job_id}/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+
+
+@pytest.mark.asyncio
+async def test_a_delivered_doc_set_cannot_be_withdrawn(api, workspace, db_session):
+    maker = await api.login("maker@example.com", workspace["password"])
+    created = await submit_via_api(maker)
+    await run_pipeline()
+
+    refused = await maker.post(f"/api/v1/jobs/{created['job_id']}/cancel")
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["error"]["message"] == "a delivered doc set cannot be cancelled"

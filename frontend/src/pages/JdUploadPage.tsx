@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ClipboardPaste, Clock, Send, TriangleAlert } from "lucide-react";
+import { ClipboardPaste, Clock, Send, TriangleAlert, X } from "lucide-react";
 import { api, errorMessage, isApiError } from "../lib/api";
 import { formatSeq, formatTime, todayISO } from "../lib/format";
 import { uuid } from "../lib/utils";
 import { Badge, Button, Card, CardHeader, ErrorNote, InfoNote, Spinner } from "../ui/primitives";
+import { ConfirmDialog } from "../ui/dialog";
 import { useToast } from "../ui/toast";
 import { StatusChip } from "../components/StatusChip";
 import { useAuth } from "../auth/AuthProvider";
@@ -44,6 +45,8 @@ export function JdUploadPage() {
   const [error, setError] = useState<string | null>(null);
   const [blockedReason, setBlockedReason] = useState<"no_profile" | "paused" | null>(null);
   const [lastSeq, setLastSeq] = useState<number | null>(null);
+  const [cancelling, setCancelling] = useState<JobRow | null>(null);
+  const [cancelBusy, setCancelBusy] = useState(false);
   // JD-1: one idempotency key per submission attempt; a retry after a network drop reuses it.
   const pendingKey = useRef<{ key: string; text: string } | null>(null);
 
@@ -144,6 +147,24 @@ export function JdUploadPage() {
       setError(errorMessage(caught));
     } finally {
       setBusy(false);
+    }
+  };
+
+  /** MKR-3: a submission can be withdrawn until it is delivered. */
+  const withdraw = async () => {
+    if (!cancelling) return;
+    setCancelBusy(true);
+    try {
+      await api.post(`/jobs/${cancelling.id}/cancel`);
+      push({ tone: "success", title: t("jd.cancelled", { seq: formatSeq(cancelling.seq_no) }) });
+      setCancelling(null);
+      void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      void queryClient.invalidateQueries({ queryKey: ["limit"] });
+      void queryClient.invalidateQueries({ queryKey: ["me", "eta"] });
+    } catch (caught) {
+      push({ tone: "error", title: t("jd.cancelFailed"), description: errorMessage(caught) });
+    } finally {
+      setCancelBusy(false);
     }
   };
 
@@ -260,11 +281,33 @@ export function JdUploadPage() {
                   {formatTime(job.submitted_at)}
                 </span>
                 <StatusChip status={job.status} role={user?.role ?? "maker"} />
+                {job.delivery_status === "pending" ? (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    title={t("jd.cancelSubmission")}
+                    aria-label={t("jd.cancelSubmission")}
+                    onClick={() => setCancelling(job)}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                ) : null}
               </li>
             ))}
           </ul>
         )}
       </Card>
+
+      <ConfirmDialog
+        open={cancelling !== null}
+        title={t("jd.cancelConfirmTitle", { seq: formatSeq(cancelling?.seq_no ?? 0) })}
+        message={t("jd.cancelConfirmBody")}
+        confirmLabel={t("jd.cancelConfirmLabel")}
+        destructive
+        busy={cancelBusy}
+        onCancel={() => setCancelling(null)}
+        onConfirm={() => void withdraw()}
+      />
 
       {user?.role === "maker" && user.must_change_password ? (
         <InfoNote>

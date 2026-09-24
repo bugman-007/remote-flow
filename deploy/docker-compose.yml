@@ -87,7 +87,11 @@ services:
     # only MIN alive and the controller can widen or narrow the range at runtime
     # with `app.control.autoscale()`. billiard only ever shrinks idle children.
     command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "llm", "-P", "prefork", "--autoscale", "${LLM_POOL_MAX:-8},${LLM_POOL_MIN:-2}", "--prefetch-multiplier", "1", "-l", "INFO", "-n", "llm@%h"]
-    mem_limit: 2600m
+    # ~270 MB per autoscaled child (measured): a container that hits this limit
+    # gets its children OOM-killed, which costs the in-flight provider calls.
+    # Sized for the Settings -> Processors maximum of 10, so the memory-driven
+    # controller - not the cgroup - is what stops the growth.
+    mem_limit: 3072m
     cpu_shares: 512
     stop_grace_period: 620s
 
@@ -100,7 +104,7 @@ services:
       - .env
     environment:
       <<: *backend-env
-      RENDER_CONCURRENCY: "1"
+      RENDER_CONCURRENCY: ${RENDER_CONCURRENCY:-2}
       RB_PDF_BACKEND: ${RB_PDF_BACKEND:-unoserver}
       UNOSERVER_MAX_CONVERSIONS: "200"
       UNOSERVER_MAX_RSS_MB: "700"
@@ -112,7 +116,11 @@ services:
     volumes:
       - storage:/storage
     # HW-1: lowest CPU share plus nice -n 10 inside the entrypoint.
-    mem_limit: 1200m
+    # Two children (RENDER_CONCURRENCY) smooth the burst when several LLM calls
+    # land at once: one conversion is ~0.7 s of a single core and ~215 MB, and a
+    # solo child is idle almost always. Raise it only with the free cores to match.
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "render", "-c", "${RENDER_CONCURRENCY:-2}", "-P", "prefork", "--prefetch-multiplier", "1", "-l", "INFO", "-n", "render@%h"]
+    mem_limit: 1536m
     cpu_shares: 256
     stop_grace_period: 200s
 

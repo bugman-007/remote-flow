@@ -348,3 +348,22 @@ async def test_static_mode_pins_the_pool_and_still_admits(monkeypatch):
     )
     assert state["mode"] == "static" and state["size"] == 6 and state["budget"] == 6
     assert sent[-1] == (6, 6)
+
+
+@pytest.mark.asyncio
+async def test_the_range_is_rebroadcast_so_a_restarted_worker_converges(monkeypatch):
+    """A worker that restarts comes back on its own boot range; keep talking."""
+    import time as _time
+
+    broker = MemoryBroker()
+    sent: list[tuple[int, int]] = []
+    await _tick(monkeypatch, broker, sent=sent)
+    assert sent == [(2, 2)], "the first tick always publishes"
+
+    await _tick(monkeypatch, broker, sent=sent)
+    assert sent == [(2, 2)], "an unchanged plan is not re-sent every 10 s"
+
+    await broker.set_text(pool.LLM_PUBLISHED_KEY, str(_time.time() - (pool.PUBLISH_KEEPALIVE_S + 1)))
+    state, _ = await _tick(monkeypatch, broker, sent=sent)
+    assert sent == [(2, 2), (2, 2)], "after the keepalive the range is broadcast again"
+    assert state["applied"] is True

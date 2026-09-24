@@ -44,6 +44,14 @@ LLM_LAST_SHRINK_KEY = "rf:llm:last_shrink"
 LLM_CPU_SAMPLE_KEY = "rf:llm:cpu_sample"
 #: The ceiling the controller last applied.
 LLM_CEILING_KEY = "rf:llm:ceiling"
+#: When the range was last broadcast, so a restarted worker converges again.
+LLM_PUBLISHED_KEY = "rf:llm:published"
+
+#: Re-broadcast the range this often even when the plan has not changed. A worker
+#: that was restarted comes back with the `--autoscale` range from its command
+#: line, and the "only talk when the plan changes" rule would otherwise leave it
+#: running a range nobody asked for.
+PUBLISH_KEEPALIVE_S = 60.0
 
 MODE_STATIC = "static"
 MODE_DYNAMIC = "dynamic"
@@ -407,9 +415,13 @@ async def tick(session, *, broker: Broker | None = None) -> dict[str, Any]:
     previous = await load_plan(broker)
     applied = False
     control: dict[str, Any] = {"sent": False}
-    if plan.size != (previous or {}).get("size") or plan.floor != (previous or {}).get("floor"):
+    changed = plan.size != (previous or {}).get("size") or plan.floor != (previous or {}).get("floor")
+    stale = await _age(broker, LLM_PUBLISHED_KEY) >= PUBLISH_KEEPALIVE_S
+    if changed or stale:
         control = send_autoscale(plan.size, plan.floor)
         applied = bool(control.get("sent"))
+        if applied:
+            await _stamp(broker, LLM_PUBLISHED_KEY)
     if plan.ceiling != ceiling_raw:
         await broker.set_int(LLM_CEILING_KEY, plan.ceiling, ttl_seconds=3600)
     if plan.grew:
