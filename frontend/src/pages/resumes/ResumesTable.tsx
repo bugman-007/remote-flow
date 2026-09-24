@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
-import { Download, Eye, ListTree, Pencil, Play, RefreshCw, SkipForward, Sparkles, Star } from "lucide-react";
+import { Download, Eye, ListTree, Pencil, Play, RefreshCw, SkipForward, Sparkles, Star, Trash2 } from "lucide-react";
 import { api, downloadBlob, errorMessage } from "../../lib/api";
 import { formatDateTime, formatTime, formatSeq } from "../../lib/format";
 import { Badge, Button, Checkbox, Input } from "../../ui/primitives";
 import { Table, TableState } from "../../ui/table";
 import { DropdownMenu, MenuItem, MenuSeparator } from "../../ui/menu";
-import { Dialog } from "../../ui/dialog";
+import { ConfirmDialog, Dialog } from "../../ui/dialog";
 import { FileChips } from "../../components/FileChips";
 import { StatusChip } from "../../components/StatusChip";
 import { t } from "../../i18n";
@@ -41,6 +41,8 @@ export function ResumesTable({
 }: Props) {
   const [renaming, setRenaming] = useState<DocSetRow | null>(null);
   const [regenerating, setRegenerating] = useState<DocSetRow | null>(null);
+  const [deleting, setDeleting] = useState<DocSetRow | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const isManager = role === "manager";
@@ -67,6 +69,22 @@ export function ResumesTable({
   };
 
   const sortArrow = (key: string) => (sort.key === key ? (sort.dir === "asc" ? " ↑" : " ↓") : "");
+
+  const deleteRow = async () => {
+    if (!deleting) return;
+    setBusy(true);
+    setDeleteError(null);
+    try {
+      await api.del(`/doc-sets/${deleting.doc_set_id}`, { confirm: true });
+      setNotice(t("toast.deleted", { count: 1 }));
+      setDeleting(null);
+      onChanged();
+    } catch (caught) {
+      setDeleteError(errorMessage(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <>
@@ -267,6 +285,17 @@ export function ResumesTable({
                                   <Eye className="mr-2 inline h-3.5 w-3.5" />
                                   {t("resumes.viewLlmJson")}
                                 </MenuItem>
+                                <MenuSeparator />
+                                <MenuItem
+                                  onSelect={() => {
+                                    close();
+                                    setDeleteError(null);
+                                    setDeleting(row);
+                                  }}
+                                >
+                                  <Trash2 className="mr-2 inline h-3.5 w-3.5 text-destructive" />
+                                  <span className="text-destructive">{t("resumes.deletePermanently")}</span>
+                                </MenuItem>
                               </>
                             ) : null}
                           </>
@@ -290,6 +319,22 @@ export function ResumesTable({
           await act(() => api.patch(`/doc-sets/${renaming.doc_set_id}`, values), t("toast.saved"));
           setRenaming(null);
         }}
+      />
+
+      <ConfirmDialog
+        open={Boolean(deleting)}
+        destructive
+        busy={busy}
+        title={t("resumes.deleteTitle")}
+        message={
+          <>
+            {t("resumes.deleteOne")}
+            {deleteError ? <span className="mt-2 block text-destructive">{deleteError}</span> : null}
+          </>
+        }
+        confirmLabel={t("resumes.deleteConfirmLabel")}
+        onCancel={() => setDeleting(null)}
+        onConfirm={() => void deleteRow()}
       />
 
       <Dialog

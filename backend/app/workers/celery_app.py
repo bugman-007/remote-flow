@@ -41,6 +41,7 @@ celery_app.conf.update(
         "app.workers.tasks.run_retention_sweep": {"queue": "ops"},
         "app.workers.tasks.check_disk": {"queue": "ops"},
         "app.workers.tasks.refresh_stats": {"queue": "ops"},
+        "app.workers.tasks.pool_tick": {"queue": "ops"},
     },
     broker_transport_options={"queue_order_strategy": "priority", "visibility_timeout": 3600},
     task_default_priority=5,
@@ -56,6 +57,9 @@ celery_app.conf.update(
         "relay-outbox": {"task": "app.workers.tasks.relay_outbox", "schedule": schedule(settings.outbox_relay_seconds)},
         "retention-sweep": {"task": "app.workers.tasks.run_retention_sweep", "schedule": schedule(settings.retention_sweep_seconds)},
         "disk-check": {"task": "app.workers.tasks.check_disk", "schedule": schedule(settings.disk_check_seconds)},
+        # CONC-2: the pool controller runs on its own cadence; it is cheap (two
+        # Redis reads, one /proc read, one COUNT) and idempotent.
+        "pool-tick": {"task": "app.workers.tasks.pool_tick", "schedule": schedule(settings.pool_tick_seconds)},
         "refresh-stats": {"task": "app.workers.tasks.refresh_stats", "schedule": schedule(settings.stats_refresh_seconds)},
     },
 )

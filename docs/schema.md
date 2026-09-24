@@ -30,7 +30,11 @@ Integrity notes:
 - `generation_attempts` has a unique `(generation_id, stage, attempt_no)`.
 - Immutable-then-expired rows (`files.expired_at`, `generations.expired_at`,
   `doc_sets.files_expired_at`) are tombstoned rather than deleted so the audit
-  trail survives retention.
+  trail survives retention. The one exception is the Manager's **permanent
+  delete** (`POST /api/v1/doc-sets/bulk-delete`), which removes the `files`,
+  `generation_attempts`, `pipeline_events`, `generations`, `doc_sets` and `jobs`
+  rows for the selected resumes along with their storage folders
+  (`app/services/purge.py`).
 
 ---
 
@@ -580,6 +584,17 @@ Integrity notes:
 
 - unique: `name`
 
+`params` holds the Appendix C/C.2 theme object. Since the theme editor shipped
+(C.2) it has two nested keys on top of the flat page fields:
+
+| key | shape | meaning |
+| --- | --- | --- |
+| `elements` | `{kind: {field: value}}` | per-element overrides for `name`, `title`, `contact`, `section`, `job`, `meta`, `bullet`, `skills`, `body`. Only the keys present are overridden; everything else falls back to the generator default. |
+| `text_rules` | `[{text, bold?, italic?, underline?, uppercase?, weight?, color?, bg?}]` | styles any run whose text contains `text` (case-insensitive) in every document rendered from this theme. |
+
+Old themes and generations keep working: `build_docx` merges the snapshot over
+`core.DEFAULTS`, so a v1 snapshot simply has no overrides.
+
 ## `users`
 
 | column | type | null | key |
@@ -614,4 +629,3 @@ Integrity notes:
 | `updated_at` | `DATETIME` | no |  |
 
 - unique: `name`
-

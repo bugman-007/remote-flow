@@ -36,6 +36,12 @@ class BulkSelectRequest(Model):
     selected: bool = True
 
 
+class BulkDeleteRequest(Model):
+    """Owner request: permanently remove the selected resumes, files included."""
+
+    ids: list[str]
+
+
 class ZipRequest(Model):
     ids: list[str]
     generation: str | None = None

@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     retention_sweep_seconds: int = 24 * 3600
     disk_check_seconds: int = 300
     stats_refresh_seconds: int = 300
+    #: CONC-2: how often the dynamic-pool controller measures and re-decides.
+    pool_tick_seconds: int = 10
     provider_default_max_concurrency: int = 8
     provider_default_rpm: int = 60
 

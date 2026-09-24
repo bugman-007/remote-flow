@@ -32,6 +32,18 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "disk_warn_pct": 85,
     "disk_pause_intake_pct": 90,
     "disk_pause_render_pct": 95,
+    # LLM worker pool (CONC-2): static sizing or memory-driven autoscaling.
+    "llm_pool_mode": "static",
+    "llm_pool_static_size": 6,
+    "llm_pool_min": 2,
+    "llm_pool_max": 8,
+    "llm_grow_below_pct": 70,
+    "llm_admit_above_pct": 85,
+    "llm_shrink_above_pct": 90,
+    "llm_shrink_below_pct": 80,
+    "llm_scale_step": 1,
+    "llm_scale_interval_s": 15,
+    "llm_shrink_cooldown_s": 45,
     # Runtime switches (SET-14)
     "intake_paused": False,
     "intake_pause_reason": None,
@@ -48,6 +60,17 @@ SETTING_TYPES: dict[str, type | tuple[type, ...]] = {
     "render_timeout_s": int,
     "max_llm_attempts": int,
     "max_render_attempts": int,
+    "llm_pool_mode": str,
+    "llm_pool_static_size": int,
+    "llm_pool_min": int,
+    "llm_pool_max": int,
+    "llm_grow_below_pct": int,
+    "llm_admit_above_pct": int,
+    "llm_shrink_above_pct": int,
+    "llm_shrink_below_pct": int,
+    "llm_scale_step": int,
+    "llm_scale_interval_s": int,
+    "llm_shrink_cooldown_s": int,
     "show_selection_to_makers": bool,
     "default_interview_template_id": (str, type(None)),
     "attempt_artifacts_retention_days": int,
@@ -68,9 +91,38 @@ class SettingsError(ValueError):
     pass
 
 
+#: Bounds for the pool settings; enforced here so the API cannot store nonsense.
+SETTING_BOUNDS: dict[str, tuple[int, int]] = {
+    "llm_pool_static_size": (1, 32),
+    "llm_pool_min": (1, 32),
+    "llm_pool_max": (1, 32),
+    "llm_grow_below_pct": (10, 95),
+    "llm_admit_above_pct": (20, 99),
+    "llm_shrink_above_pct": (20, 99),
+    "llm_shrink_below_pct": (10, 98),
+    "llm_scale_step": (1, 8),
+    "llm_scale_interval_s": (5, 600),
+    "llm_shrink_cooldown_s": (5, 900),
+}
+
+#: The two LLM pool modes (CONC-2).
+POOL_MODES = ("static", "dynamic")
+
+
 def validate_setting(key: str, value: Any) -> Any:
     if key not in SETTING_DEFAULTS:
         raise SettingsError(f"unknown setting: {key}")
+    if key == "llm_pool_mode":
+        if value not in POOL_MODES:
+            raise SettingsError(f"llm_pool_mode must be one of {', '.join(POOL_MODES)}")
+        return value
+    if key in SETTING_BOUNDS:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise SettingsError(f"{key} must be an integer")
+        low, high = SETTING_BOUNDS[key]
+        if not low <= value <= high:
+            raise SettingsError(f"{key} must be between {low} and {high}")
+        return value
     expected = SETTING_TYPES[key]
     if expected is bool:
         if not isinstance(value, bool):

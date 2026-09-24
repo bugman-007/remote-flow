@@ -29,6 +29,7 @@ from app.models import (
     PromptVersion,
 )
 from app.services import events, release, render, settings_store, storage
+from app.services import pool
 from app.services.broker import Broker, get_broker
 from app.services.dispatch import enqueue_after_commit
 from app.services.llm import (
@@ -121,6 +122,21 @@ async def load_generation(session: AsyncSession, generation_id: str) -> Generati
             .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
+
+
+async def defer_llm_dispatch(session: AsyncSession, generation_id: str) -> None:
+    """Hand a build back to ``dispatch_sweep`` without spending an attempt.
+
+    The worker consumed a message it had no capacity for; re-publishing it here
+    would spin the queue, so the row simply goes back to ``pending`` and the
+    next sweep (or the controller opening the throttle) picks it up. The
+    in-flight marker has to be dropped too: the build is no longer on the
+    queue, and leaving it behind would eat an admission slot for 15 minutes.
+    """
+    await pool.clear_inflight(get_broker(), generation_id)
+    await session.execute(
+        update(Generation).where(Generation.id == generation_id).values(dispatch_state="pending")
+    )
 
 
 async def claim_build(
@@ -231,6 +247,10 @@ async def record_failure(
     settings = get_settings()
     stage = claim.stage
     moment = now()
+    if stage == "llm":
+        # The build leaves the LLM queue either way: terminal, or re-dispatched
+        # later (which marks it in flight again).
+        await pool.clear_inflight(get_broker(), generation.id)
     claim.attempt.outcome = "timed_out" if timed_out else "failed"
     claim.attempt.finished_at = moment
     claim.attempt.error_code = error_code
@@ -354,26 +374,32 @@ async def emit_build_event(session: AsyncSession, generation: Generation, event_
 # ------------------------------------------------------------------ provider IO
 
 
-async def acquire_provider_slot(broker: Broker, provider: LLMProvider) -> bool:
-    """CONC-3: semaphore + request-per-minute bucket, acquired before the claim."""
+async def acquire_provider_slot(broker: Broker, provider: LLMProvider) -> str | None:
+    """CONC-3: semaphore + request-per-minute bucket, acquired before the claim.
+
+    The slot marker outlives the call (``timeout_s + grace``), so it is a true
+    concurrency limit: a 30 s marker on a 3-minute call only measured arrivals
+    in the last 30 s and let the pool overshoot the provider's tier.
+    """
     key = f"rf:provider:{provider.id}:slots"
-    acquired = await broker.acquire_slot(
-        key, limit=provider_slot_limit(provider), timeout_s=provider.timeout_s
+    ttl = float(provider.timeout_s) + 120.0
+    token = await broker.acquire_slot(
+        key, limit=provider_slot_limit(provider), timeout_s=provider.timeout_s, ttl_s=ttl
     )
-    if not acquired:
-        return False
+    if token is None:
+        return None
     for _ in range(4):
         minute = int(time.time() // 60)
         count = await broker.incr(f"rf:provider:{provider.id}:rpm:{minute}", ttl_seconds=120)
         if count <= max(provider.rpm, 1):
-            return True
-        await broker.release_slot(key)
-        return False
-    return True
+            return token
+        await broker.release_slot(key, token)
+        return None
+    return token
 
 
-async def release_provider_slot(broker: Broker, provider: LLMProvider) -> None:
-    await broker.release_slot(f"rf:provider:{provider.id}:slots")
+async def release_provider_slot(broker: Broker, provider: LLMProvider, token: str | None) -> None:
+    await broker.release_slot(f"rf:provider:{provider.id}:slots", token)
 
 
 async def load_provider_config(session: AsyncSession, generation: Generation) -> tuple[LLMProvider, ProviderConfig]:
@@ -469,13 +495,28 @@ async def execute_llm_attempt(session: AsyncSession, generation_id: str, *, work
         logger.warning("llm attempt failed before call", extra={"generation_id": generation_id})
         return result
 
-    if not await acquire_provider_slot(broker, provider):
-        enqueue_after_commit(session, generation_id, "llm", high_priority=True)
+    # CONC-2: admission control. The dynamic pool controller publishes a budget
+    # in Redis; a build that cannot get a slot is left for ``dispatch_sweep``
+    # instead of being re-published here, which would spin the queue.
+    budget = await pool.get_budget(broker, fallback=0)
+    active_token = await pool.begin_active(broker, budget=budget, ttl_s=settings.llm_timeout_s + 300)
+    if active_token is None:
+        await defer_llm_dispatch(session, generation_id)
         return None
+    provider_token: str | None = None
     try:
+        provider_token = await acquire_provider_slot(broker, provider)
+        if provider_token is None:
+            enqueue_after_commit(session, generation_id, "llm", high_priority=True)
+            return None
         claim = await claim_build(session, generation_id, "llm", worker, timeout_s=settings.llm_timeout_s)
         if claim is None:
             return None
+        # PIPE-2: publish the claim before the provider call. The call can take minutes,
+        # and an unpublished claim stays invisible to ``dispatch_sweep`` while its row
+        # lock is held - so a duplicate dispatch would block for the whole call instead
+        # of no-oping immediately.
+        await session.commit()
         job = await session.get(Job, generation.job_id)
         profile_prompt = await prompt_body(session, generation)
         request_payload = {
@@ -542,6 +583,7 @@ async def execute_llm_attempt(session: AsyncSession, generation_id: str, *, work
             claim.attempt.finished_at = now()
             claim.attempt.artifacts_dir = storage.relative_to_root(artifacts_dir)
             return None
+        await pool.clear_inflight(broker, generation.id)
         claim.attempt.outcome = "succeeded"
         claim.attempt.finished_at = now()
         claim.attempt.artifacts_dir = storage.relative_to_root(artifacts_dir)
@@ -559,7 +601,8 @@ async def execute_llm_attempt(session: AsyncSession, generation_id: str, *, work
         await emit_job_status(session, generation, extra={"status": "rendering", "stage": "render"})
         return "rendering"
     finally:
-        await release_provider_slot(broker, provider)
+        await release_provider_slot(broker, provider, provider_token)
+        await pool.end_active(broker, active_token)
 
 
 async def execute_render_attempt(session: AsyncSession, generation_id: str, *, worker: str = "worker-render") -> str | None:
@@ -572,6 +615,9 @@ async def execute_render_attempt(session: AsyncSession, generation_id: str, *, w
     claim = await claim_build(session, generation_id, "render", worker, timeout_s=settings.render_timeout_s)
     if claim is None:
         return None
+    # PIPE-2: same as the LLM stage - the conversion is slow, so the lease is published
+    # (and the row lock released) before the renderer starts.
+    await session.commit()
     doc_set = await release.doc_set_for_job(session, generation.job_id)
     if doc_set is None or not doc_set.storage_dir:
         return await record_failure(
@@ -742,8 +788,22 @@ async def dispatch_sweep(session: AsyncSession, *, stale_after_s: int = 120) -> 
             .limit(500)
         )
     ).scalars().all()
+    broker = get_broker()
+    budget = await pool.get_budget(broker, fallback=0)
+    room: int | None = None
+    if budget > 0:
+        room = max(0, budget - await pool.inflight_count(broker))
     dispatched = 0
     for generation in [*rows, *stale]:
+        if generation.stage == "llm":
+            # CONC-2: never publish more LLM work than the pool can hold. Builds
+            # that do not fit stay ``pending`` and are picked up by the next
+            # sweep once the controller opens the throttle again.
+            if room is not None and room <= 0:
+                continue
+            if room is not None:
+                room -= 1
+            await pool.mark_inflight(broker, generation.id)
         generation.dispatch_state = "sent"
         generation.dispatched_at = moment
         enqueue_after_commit(session, generation.id, generation.stage, high_priority=generation.status == "retry_wait")

@@ -6,6 +6,7 @@ import asyncio
 import logging
 from typing import Any, Protocol
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -72,12 +73,30 @@ def enqueue_after_commit(session: AsyncSession, generation_id: str, stage: str, 
 async def flush_dispatches(session: AsyncSession) -> int:
     """Call after ``commit()``; safe to call when nothing is pending."""
     pending: list[tuple[str, str, bool]] = session.info.pop(DISPATCH_KEY, [])
+    if not pending:
+        return 0
     dispatcher = get_dispatcher()
+    accepted: list[str] = []
     for generation_id, stage, high_priority in pending:
         try:
             await dispatcher.enqueue(generation_id, stage, high_priority=high_priority)
         except Exception:  # noqa: BLE001 - the dispatch sweep will retry
             logger.exception("dispatch failed", extra={"generation_id": generation_id, "stage": stage})
+        else:
+            accepted.append(generation_id)
+    if accepted:
+        from app.models import Generation
+        from app.utils import utcnow
+
+        # PIPE-3: record that the broker took this work. A build left on ``pending``
+        # while its task is already running is re-published by every ``dispatch_sweep``
+        # pass, and each duplicate burns a worker slot waiting on the row lock.
+        await session.execute(
+            update(Generation)
+            .where(Generation.id.in_(accepted))
+            .values(dispatch_state="sent", dispatched_at=utcnow())
+        )
+        await session.commit()
     return len(pending)
 
 

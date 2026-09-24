@@ -329,7 +329,7 @@ Worked example: a Maker submits #001…#100 five seconds apart. #001's LLM call 
 ### 4.4 Concurrency and throughput
 
 - **CONC-1 (P0)** Fresh builds are enqueued FIFO by ordering key at normal priority; retries and Manager "Retry now" use high priority (Celery `priority` on the Redis broker, `queue_order_strategy = priority`).
-- **CONC-2 (P0)** `worker-llm` runs many concurrent tasks (default 16 greenlets in one process; I/O bound). `worker-render` runs **1** process on the target server (HW-1) with a warm `unoserver`. `worker-ops` runs only short maintenance tasks. Queues are independent so a backlog in one never starves another.
+- **CONC-2 (P0)** `worker-llm` runs an autoscaled process pool (default 2–8, I/O-bound calls), sized by either a **Static** count or a memory-driven **Dynamic** controller the Manager picks in Settings → Processors (Appendix C.3). `worker-render` runs **1** process on the target server (HW-1) with a warm `unoserver`. `worker-ops` runs only short maintenance tasks. Queues are independent so a backlog in one never starves another.
 - **CONC-3 (P0)** Each Provider has `max_concurrency` (default 8) and `requests_per_minute` (default 60) enforced with a Redis semaphore and token bucket. A task acquires its slot **before** claiming the build (PIPE-2) and waits in place (bounded, with jitter) rather than re-queuing.
 - **CONC-4 (P0)** HTTP 429 responses respect `Retry-After` and additionally reduce the provider's effective concurrency by 25% for 60 s (simple adaptive backoff).
 - **CONC-5 (P1)** Prompt caching is enabled when the provider supports it (e.g. Anthropic `cache_control` on the system prompt, OpenAI automatic). The long Profile prompt is placed first and unchanged; the JD goes last.
@@ -836,4 +836,91 @@ Mirrors the generator's `DEFAULTS` (the keys of `style.json`) with the ranges us
 | `margin_left` | inches | `0.75` | 0.3 – 1.5 | |
 | `margin_right` | inches | `0.75` | 0.3 – 1.5 | |
 
-Fixed by the generator (not themeable in v1): text colours (`body #262626`, `muted #595959`), Google logo colours, paragraph spacing per block kind (`KIND_PROPS`), bullet glyph and indent, contact separators, section title casing. Exposing any of these is a generator change plus a new schema version.
+Fixed by the generator: Google logo colours and contact separators.
+
+### Appendix C.2 — Theme schema v2 (element scoping, shipped 2026-09-24)
+
+The theme editor styles the document at two levels, so a Manager can select a
+part of the preview and change only that part.
+
+**Page-level additions** (same `params` object as C):
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `body_color` | hex colour | `"#262626"` | Default body text colour. |
+| `muted_color` | hex colour | `"#595959"` | Contact line, meta and date colour. |
+| `bullet_glyph` | string | `"•"` | Glyph drawn before every bullet. |
+| `page_size` | `"Letter"` \| `"A4"` | `"Letter"` | Paper size of every generated document. |
+
+**`elements` — per-kind overrides.** Keys: `name`, `title`, `contact`,
+`section`, `job`, `meta`, `bullet`, `skills`, `body`. Each kind accepts a subset
+of: `font`, `size` (pt), `size_delta` (pt), `weight` (100–900), `bold`, `italic`,
+`underline`, `uppercase`, `align` (`left`/`center`/`right`/`justify`), `color`,
+`bg`, `letter_spacing` (pt, `w:spacing`), `width_scale` (%, `w:w`),
+`line_height`, `space_before`, `space_after`, `indent_left`, `indent_right`,
+`first_line_indent` (inches), `rule`/`rule_width` (section underline), `hidden`.
+Absent keys inherit the generator default for that kind; `hidden` drops the kind
+from the document entirely.
+
+**`text_rules` — phrase-level styling.** `[{text, bold?, italic?, underline?,
+uppercase?, weight?, color?, bg?}]`, max 40 entries. A rule styles every run
+whose text contains `text` (case-insensitive) in *every* document rendered from
+the theme, so a Manager can select a phrase in the preview and keep it bold
+regardless of what the model writes. This is how the editor's "select text and
+restyle it" works; it is independent of `[highlight]` markers in the model's
+JSON.
+
+**Editor (SET-10).** The Theme Editor renders the bundled `sample.json` through
+the real block model in the browser (`GET /themes/sample` returns the generator's
+own `build_blocks()` output) so edits preview instantly with no LLM call, no
+render worker and no document round trip. `POST /themes/preview` still produces
+a real LibreOffice PDF ("Render PDF proof"). Presets (`GET /themes/schema` →
+`editor.presets`) provide modern/compact/elegant starting points.
+
+**Worker pool (CONC-2 update).** See Appendix C.3.
+
+### Appendix C.3 — Generation processor modes (CONC-2, shipped 2026-09-24)
+
+The LLM worker runs under Celery's `--autoscale=MAX,MIN`, so children exist only
+while there is work. Settings → **Processors** picks how that range is driven:
+
+| Mode | What it does |
+|---|---|
+| **Static** | Pinned to the Manager's number (default 6). Predictable RAM cost. |
+| **Dynamic** | The controller measures the *whole box* from `/proc` every 10 s and moves the range. |
+
+**Dynamic rules.** Memory is the only hard limit - the LLM children sit near 0 %
+CPU while they wait on the provider, so CPU can veto a growth step but never
+forces a release. `memory used` is `1 - MemAvailable/MemTotal`, i.e. reclaimable
+page cache counts as free.
+
+| Setting | Default | Behaviour |
+|---|---|---|
+| `llm_pool_min` / `llm_pool_max` | 2 / 8 | floor and the provider-tier ceiling |
+| `llm_grow_below_pct` | 70 | grow only while memory used is under this |
+| `llm_admit_above_pct` | 85 | stop admitting new builds at/above this |
+| `llm_shrink_above_pct` | 90 | release processors at/above this |
+| `llm_shrink_below_pct` | 80 | hysteresis: the pool stays small until memory recovers |
+| `llm_scale_step` / `llm_scale_interval_s` | 1 / 15 s | the ramp moves one processor per interval |
+| `llm_shrink_cooldown_s` | 45 s | at most one release per cooldown |
+
+With nothing running and nothing queued the pool drops to the floor, so a quiet
+box gives its RAM back. A release is job-safe by construction: the controller
+only lowers the ceiling to the number of calls it can see running, and billiard's
+`Pool.shrink` in turn terminates only children with no active job (it raises
+"Can't shrink pool. All processes busy!" instead of killing a busy one).
+Admission control publishes a budget to Redis; `dispatch_sweep` never publishes
+more LLM work than the budget allows and returns the overflow to `pending` - a
+build that finds no capacity never spends an attempt. The controller's 10 s tick
+ends with a sweep, so a slot that just opened is filled immediately rather than
+waiting for the 30 s sweep, which is what makes the pool actually pay off in
+completed doc sets per minute.
+
+State and overrides: `GET /api/v1/system/pool` (mode, decision, reason, floor,
+ceiling, size, budget, active, inflight, backlog, memory, CPU) and
+`POST /api/v1/system/pool/apply` (one cycle now, audited). `LLM_POOL_MIN` /
+`LLM_POOL_MAX` in `deploy/.env` are only the worker's boot range; the Manager's
+setting moves it at runtime.
+
+**Versioning.** `GENERATOR_VERSION` is `2.0.0-remote-flow`. Explicitly *not*
+exposed: Google logo colours and contact separators.

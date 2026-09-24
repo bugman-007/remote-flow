@@ -12,7 +12,7 @@ public surface used by Remote Flow:
 
 from __future__ import annotations
 
-GENERATOR_VERSION = "1.0.0-remote-flow"
+GENERATOR_VERSION = "2.0.0-remote-flow"
 
 from . import core, pdf  # noqa: E402  (kept after GENERATOR_VERSION on purpose)
 

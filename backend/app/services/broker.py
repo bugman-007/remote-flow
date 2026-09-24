@@ -25,9 +25,16 @@ class Broker(Protocol):
     async def read_stream(self, stream: str, *, after_id: str | None = None, limit: int = 500) -> list[tuple[str, dict]]: ...
     async def incr(self, key: str, *, ttl_seconds: int) -> int: ...
     async def get_int(self, key: str) -> int: ...
+    async def set_int(self, key: str, value: int, *, ttl_seconds: int = 300) -> None: ...
+    async def get_text(self, key: str) -> str | None: ...
+    async def set_text(self, key: str, value: str, *, ttl_seconds: int = 3600) -> None: ...
     async def delete(self, key: str) -> None: ...
-    async def acquire_slot(self, key: str, *, limit: int, timeout_s: float) -> bool: ...
-    async def release_slot(self, key: str) -> None: ...
+    async def zadd(self, key: str, member: str, score: float) -> None: ...
+    async def zrem(self, key: str, member: str) -> None: ...
+    async def zcount(self, key: str) -> int: ...
+    async def zmembers(self, key: str) -> list[str]: ...
+    async def acquire_slot(self, key: str, *, limit: int, timeout_s: float, ttl_s: float = 30.0) -> str | None: ...
+    async def release_slot(self, key: str, token: str | None = None) -> None: ...
     async def slots_in_use(self, key: str) -> int: ...
     async def health(self) -> bool: ...
     async def close(self) -> None: ...
@@ -41,7 +48,9 @@ class MemoryBroker:
         self._subscribers: dict[str, set[asyncio.Queue]] = defaultdict(set)
         self._streams: dict[str, deque[tuple[str, dict]]] = defaultdict(lambda: deque(maxlen=500))
         self._counters: dict[str, tuple[int, float | None]] = {}
-        self._slots: dict[str, deque[float]] = defaultdict(deque)
+        self._text: dict[str, tuple[str, float | None]] = {}
+        self._zsets: dict[str, dict[str, float]] = defaultdict(dict)
+        self._slots: dict[str, deque[tuple[str, float]]] = defaultdict(deque)
         self._stream_seq = 0
         self._lock = asyncio.Lock()
 
@@ -90,37 +99,88 @@ class MemoryBroker:
             return 0
         return value
 
+    async def set_int(self, key: str, value: int, *, ttl_seconds: int = 300) -> None:
+        self._counters[key] = (int(value), time.time() + ttl_seconds)
+
+    async def get_text(self, key: str) -> str | None:
+        value, expires = self._text.get(key, (None, None))
+        if expires and expires < time.time():
+            return None
+        return value
+
+    async def set_text(self, key: str, value: str, *, ttl_seconds: int = 3600) -> None:
+        self._text[key] = (value, time.time() + ttl_seconds)
+
     async def delete(self, key: str) -> None:
         self._counters.pop(key, None)
+        self._text.pop(key, None)
+        self._zsets.pop(key, None)
+
+    async def zadd(self, key: str, member: str, score: float) -> None:
+        self._zsets[key][member] = score
+
+    async def zrem(self, key: str, member: str) -> None:
+        self._zsets.get(key, {}).pop(member, None)
+
+    def _prune_zset(self, key: str) -> dict[str, float]:
+        entries = self._zsets.get(key) or {}
+        now = time.time()
+        for member, score in list(entries.items()):
+            if score <= now:
+                entries.pop(member, None)
+        return entries
+
+    async def zcount(self, key: str) -> int:
+        return len(self._prune_zset(key))
+
+    async def zmembers(self, key: str) -> list[str]:
+        entries = self._prune_zset(key)
+        return [member for member, _score in sorted(entries.items(), key=lambda item: item[1])]
 
     #: Mirrors the Redis broker: a slot marker left behind by a crashed worker
     #: expires, so a killed process can never wedge the provider concurrency.
     SLOT_TTL_SECONDS = 30.0
 
-    async def acquire_slot(self, key: str, *, limit: int, timeout_s: float) -> bool:
+    @staticmethod
+    def _prune(bucket: deque[tuple[str, float]]) -> None:
+        now = time.time()
+        while bucket and bucket[0][1] <= now:
+            bucket.popleft()
+
+    async def acquire_slot(self, key: str, *, limit: int, timeout_s: float, ttl_s: float = SLOT_TTL_SECONDS) -> str | None:
         deadline = time.time() + timeout_s
         while True:
             bucket = self._slots[key]
-            now = time.time()
-            while bucket and bucket[0] <= now:
-                bucket.popleft()
+            self._prune(bucket)
             if len(bucket) < limit:
-                bucket.append(now + self.SLOT_TTL_SECONDS)
-                return True
+                token = f"{time.time()}:{id(self)}:{len(bucket)}"
+                bucket.append((token, time.time() + max(ttl_s, 1.0)))
+                return token
             if time.time() >= deadline:
-                return False
+                return None
             await asyncio.sleep(0.05)
 
-    async def release_slot(self, key: str) -> None:
+    async def release_slot(self, key: str, token: str | None = None) -> None:
         bucket = self._slots.get(key)
-        now = time.time()
-        while bucket and bucket[0] <= now:
+        if not bucket:
+            return
+        self._prune(bucket)
+        if not bucket:
+            return
+        if token is None:
             bucket.popleft()
-        if bucket:
-            bucket.pop()
+            return
+        for index, (existing, _expires) in enumerate(bucket):
+            if existing == token:
+                del bucket[index]
+                return
 
     async def slots_in_use(self, key: str) -> int:
-        return len(self._slots.get(key, ()))
+        bucket = self._slots.get(key)
+        if not bucket:
+            return 0
+        self._prune(bucket)
+        return len(bucket)
 
     async def health(self) -> bool:
         return True
@@ -178,35 +238,78 @@ class RedisBroker:
     async def incr(self, key: str, *, ttl_seconds: int) -> int:
         value = await self._client.incr(key)
         if value == 1:
-            await self._client.expire(key, ttl_seconds)
+            await self._client.expire(key, int(ttl_seconds))
         return int(value)
 
     async def get_int(self, key: str) -> int:
         value = await self._client.get(key)
         return int(value or 0)
 
+    async def set_int(self, key: str, value: int, *, ttl_seconds: int = 300) -> None:
+        # redis-py rejects a float EX ("ex must be datetime.timedelta or int");
+        # callers pass a plain number of seconds, sometimes as a float.
+        await self._client.set(key, int(value), ex=int(ttl_seconds))
+
+    async def get_text(self, key: str) -> str | None:
+        value = await self._client.get(key)
+        if isinstance(value, bytes):
+            return value.decode("utf-8")
+        return value
+
+    async def set_text(self, key: str, value: str, *, ttl_seconds: int = 3600) -> None:
+        await self._client.set(key, value, ex=int(ttl_seconds))
+
     async def delete(self, key: str) -> None:
         await self._client.delete(key)
 
-    async def acquire_slot(self, key: str, *, limit: int, timeout_s: float) -> bool:
+    async def zadd(self, key: str, member: str, score: float) -> None:
+        await self._client.zadd(key, {member: float(score)})
+
+    async def zrem(self, key: str, member: str) -> None:
+        await self._client.zrem(key, member)
+
+    async def zcount(self, key: str) -> int:
+        await self._client.zremrangebyscore(key, "-inf", time.time())
+        return int(await self._client.zcard(key))
+
+    async def zmembers(self, key: str) -> list[str]:
+        await self._client.zremrangebyscore(key, "-inf", time.time())
+        rows = await self._client.zrange(key, 0, -1)
+        return [row.decode("utf-8") if isinstance(row, bytes) else str(row) for row in rows]
+
+    async def acquire_slot(self, key: str, *, limit: int, timeout_s: float, ttl_s: float = 30.0) -> str | None:
+        """Take one of ``limit`` concurrency slots for ``ttl_s`` seconds.
+
+        The marker carries its own expiry, so a worker killed mid-call releases
+        its slot on its own; ``release_slot`` removes it eagerly on the happy
+        path. The TTL must outlast the call (a 30 s marker on a 3-minute LLM
+        call is a rate window, not a concurrency limit).
+        """
         deadline = time.time() + timeout_s
+        ttl = max(float(ttl_s), 1.0)
         while True:
             now = time.time()
+            token = f"{now}:{id(self)}:{int(now * 1000) % 100000}"
             pipe = self._client.pipeline()
             pipe.zremrangebyscore(key, "-inf", now)
-            pipe.zadd(key, {f"{now}:{id(self)}": now + 30})
+            pipe.zadd(key, {token: now + ttl})
             pipe.zcard(key)
             _, _, count = await pipe.execute()
             if int(count) <= limit:
-                return True
-            await self._client.zrem(key, f"{now}:{id(self)}")
+                return token
+            await self._client.zrem(key, token)
             if time.time() >= deadline:
-                return False
+                return None
             await asyncio.sleep(0.1)
 
-    async def release_slot(self, key: str) -> None:
-        # The slot marker self-expires after 30 s; nothing to do explicitly.
-        return None
+    async def release_slot(self, key: str, token: str | None = None) -> None:
+        await self._client.zremrangebyscore(key, "-inf", time.time())
+        if token is None:
+            rows = await self._client.zrange(key, 0, 0)
+            if rows:
+                await self._client.zrem(key, rows[0])
+            return
+        await self._client.zrem(key, token)
 
     async def slots_in_use(self, key: str) -> int:
         await self._client.zremrangebyscore(key, "-inf", time.time())

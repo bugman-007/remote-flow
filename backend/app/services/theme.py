@@ -1,4 +1,4 @@
-"""Theme schema (Appendix C, GEN-6) and validation."""
+"""Theme schema (Appendix C/C.2, GEN-6) and validation."""
 
 from __future__ import annotations
 
@@ -16,18 +16,31 @@ from vendor.resume_builder import core
 DEFAULT_THEME_NAME = "Default"
 
 #: name -> (type, min, max, step) mirroring the desktop GUI's spinboxes.
+#: Appendix C.2 adds the page-level extras plus the two nested blocks
+#: (``elements`` = per-kind style overrides, ``text_rules`` = inline styling).
 THEME_FIELDS: dict[str, tuple[str, float | None, float | None, float | None]] = {
     "font": ("font", None, None, None),
     "size": ("number", 8.0, 14.0, 0.5),
     "accent": ("color", None, None, None),
     "bg_color": ("color", None, None, None),
+    "body_color": ("color", None, None, None),
+    "muted_color": ("color", None, None, None),
+    "bullet_glyph": ("text", None, None, None),
+    "page_size": ("choice", None, None, None),
     "line_height": ("number", 1.0, 2.5, 0.05),
     "section_gap": ("number", 0.0, 40.0, 1.0),
     "margin_top": ("number", 0.3, 1.5, 0.05),
     "margin_bottom": ("number", 0.3, 1.5, 0.05),
     "margin_left": ("number", 0.3, 1.5, 0.05),
     "margin_right": ("number", 0.3, 1.5, 0.05),
+    "elements": ("elements", None, None, None),
+    "text_rules": ("rules", None, None, None),
 }
+
+PAGE_SIZES: tuple[str, ...] = ("Letter", "A4")
+
+#: Cap on text rules so a theme cannot grow without bound.
+MAX_TEXT_RULES = 40
 
 #: Fonts installed in the render image (GEN-4). The DOCX keeps these names;
 #: LibreOffice substitutes the metric-compatible family for the PDF.
@@ -51,34 +64,124 @@ class ThemeValidationError(ValueError):
     pass
 
 
+def _number(key: str, value: Any, minimum: float | None, maximum: float | None) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ThemeValidationError(f"{key} must be a number")
+    number = float(value)
+    if minimum is not None and number < minimum:
+        raise ThemeValidationError(f"{key} must be >= {minimum}")
+    if maximum is not None and number > maximum:
+        raise ThemeValidationError(f"{key} must be <= {maximum}")
+    return number
+
+
+def _colour(key: str, value: Any) -> str:
+    if not isinstance(value, str):
+        raise ThemeValidationError(f"{key} must be a colour string")
+    normalised = core.color_hex(value, fallback="")
+    if not normalised:
+        raise ThemeValidationError(f"{key} must be #RRGGBB")
+    return f"#{normalised}"
+
+
+def _validate_element(kind: str, payload: Any) -> dict[str, Any]:
+    """Appendix C.2: keep only the keys the generator understands, clamped."""
+    if not isinstance(payload, dict):
+        raise ThemeValidationError(f"elements.{kind} must be an object")
+    out: dict[str, Any] = {}
+    for key, value in payload.items():
+        if key not in core.ELEMENT_FIELDS:
+            raise ThemeValidationError(f"unknown element key: {kind}.{key}")
+        if value is None:
+            continue
+        field_type = core.ELEMENT_FIELDS[key]
+        if field_type == "number":
+            minimum, maximum, _step = core.ELEMENT_BOUNDS.get(key, (None, None, None))
+            out[key] = _number(f"elements.{kind}.{key}", value, minimum, maximum)
+        elif field_type == "color":
+            out[key] = _colour(f"elements.{kind}.{key}", value)
+        elif field_type == "align":
+            if str(value) not in core.ALIGN_CHOICES:
+                raise ThemeValidationError(
+                    f"elements.{kind}.align must be one of {', '.join(core.ALIGN_CHOICES)}"
+                )
+            out[key] = str(value)
+        elif field_type == "font":
+            if not isinstance(value, str) or not value.strip():
+                raise ThemeValidationError(f"elements.{kind}.font must be a non-empty string")
+            out[key] = value.strip()
+        else:  # bool
+            out[key] = bool(value)
+    return out
+
+
+def _validate_text_rules(payload: Any) -> list[dict[str, Any]]:
+    if payload is None:
+        return []
+    if not isinstance(payload, list):
+        raise ThemeValidationError("text_rules must be a list")
+    if len(payload) > MAX_TEXT_RULES:
+        raise ThemeValidationError(f"text_rules cannot have more than {MAX_TEXT_RULES} entries")
+    rules: list[dict[str, Any]] = []
+    for index, entry in enumerate(payload):
+        if not isinstance(entry, dict):
+            raise ThemeValidationError(f"text_rules[{index}] must be an object")
+        text = str(entry.get("text") or "").strip()
+        if not text:
+            raise ThemeValidationError(f"text_rules[{index}].text must not be empty")
+        if len(text) > 160:
+            raise ThemeValidationError(f"text_rules[{index}].text must be 160 characters or fewer")
+        rule: dict[str, Any] = {"text": text}
+        for key, value in entry.items():
+            if key == "text" or value is None:
+                continue
+            if key not in core.TEXT_RULE_FIELDS:
+                raise ThemeValidationError(f"unknown text rule key: {key}")
+            if key == "color" or key == "bg":
+                rule[key] = _colour(f"text_rules[{index}].{key}", value)
+            elif key == "weight":
+                rule[key] = _number(f"text_rules[{index}].weight", value, 100, 900)
+            else:
+                rule[key] = bool(value)
+        rules.append(rule)
+    return rules
+
+
 def validate_theme_params(params: dict[str, Any]) -> dict[str, Any]:
-    """Validate against Appendix C and return the canonical, snapshot-ready object."""
+    """Validate against Appendix C/C.2 and return the canonical, snapshot-ready object."""
     if not isinstance(params, dict):
         raise ThemeValidationError("theme params must be an object")
     unknown = set(params) - set(THEME_FIELDS)
     if unknown:
         raise ThemeValidationError(f"unknown theme keys: {', '.join(sorted(unknown))}")
-    out = dict(core.DEFAULTS)
+    out = {**core.DEFAULTS, "elements": {}, "text_rules": []}
     for key, value in params.items():
         kind, minimum, maximum, _step = THEME_FIELDS[key]
         if value is None:
             continue
         if kind == "number":
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ThemeValidationError(f"{key} must be a number")
-            number = float(value)
-            if minimum is not None and number < minimum:
-                raise ThemeValidationError(f"{key} must be >= {minimum}")
-            if maximum is not None and number > maximum:
-                raise ThemeValidationError(f"{key} must be <= {maximum}")
-            out[key] = number if key != "size" and key != "section_gap" else round(number, 2)
+            number = _number(key, value, minimum, maximum)
+            out[key] = round(number, 2) if key in {"size", "section_gap"} else number
         elif kind == "color":
-            if not isinstance(value, str):
-                raise ThemeValidationError(f"{key} must be a colour string")
-            normalised = core.color_hex(value, fallback="")
-            if not normalised:
-                raise ThemeValidationError(f"{key} must be #RRGGBB")
-            out[key] = f"#{normalised}"
+            out[key] = _colour(key, value)
+        elif kind == "choice":
+            text = str(value).strip()
+            if text not in PAGE_SIZES:
+                raise ThemeValidationError(f"{key} must be one of {', '.join(PAGE_SIZES)}")
+            out[key] = text
+        elif kind == "elements":
+            if not isinstance(value, dict):
+                raise ThemeValidationError("elements must be an object")
+            elements: dict[str, Any] = {}
+            for element_kind, payload in value.items():
+                if element_kind not in core.ELEMENT_KINDS:
+                    raise ThemeValidationError(f"unknown element: {element_kind}")
+                cleaned = _validate_element(str(element_kind), payload)
+                if cleaned:
+                    elements[str(element_kind)] = cleaned
+            out["elements"] = elements
+        elif kind == "rules":
+            out["text_rules"] = _validate_text_rules(value)
         else:
             if not isinstance(value, str) or not value.strip():
                 raise ThemeValidationError(f"{key} must be a non-empty string")
@@ -88,21 +191,77 @@ def validate_theme_params(params: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+#: Which element kinds a page-level field is allowed to cascade into, and the
+#: editor group each global field belongs to.
+THEME_FIELD_GROUPS: dict[str, str] = {
+    "font": "typography",
+    "size": "typography",
+    "line_height": "typography",
+    "body_color": "typography",
+    "muted_color": "typography",
+    "accent": "colour",
+    "bg_color": "colour",
+    "section_gap": "layout",
+    "margin_top": "layout",
+    "margin_bottom": "layout",
+    "margin_left": "layout",
+    "margin_right": "layout",
+    "page_size": "layout",
+    "bullet_glyph": "layout",
+    "elements": "sections",
+    "text_rules": "sections",
+}
+
+
 def theme_form_spec() -> list[dict[str, Any]]:
-    """Field metadata for `GET /themes/schema`, used to render the Settings form."""
-    return [
-        {
-            "key": key,
-            "type": kind,
-            "min": minimum,
-            "max": maximum,
-            "step": step,
-            "default": core.DEFAULTS[key],
-            "options": [entry["name"] for entry in RENDER_FONTS] if kind == "font" else None,
-            "font_labels": RENDER_FONTS if kind == "font" else None,
-        }
-        for key, (kind, minimum, maximum, step) in THEME_FIELDS.items()
-    ]
+    """Field metadata for ``GET /themes/schema``, used to render the editor."""
+    spec: list[dict[str, Any]] = []
+    for key, (kind, minimum, maximum, step) in THEME_FIELDS.items():
+        if kind in {"elements", "rules"}:
+            continue
+        spec.append(
+            {
+                "key": key,
+                "type": kind,
+                "min": minimum,
+                "max": maximum,
+                "step": step,
+                "default": core.DEFAULTS[key],
+                "group": THEME_FIELD_GROUPS.get(key, "layout"),
+                "options": {
+                    "font": [entry["name"] for entry in RENDER_FONTS],
+                    "choice": list(PAGE_SIZES),
+                }.get(kind),
+                "font_labels": RENDER_FONTS if kind == "font" else None,
+            }
+        )
+    return spec
+
+
+def theme_editor_spec() -> dict[str, Any]:
+    """Everything the Theme Editor needs beyond the flat fields (Appendix C.2)."""
+    return {
+        "elements": core.element_form_spec(),
+        "element_labels": core.ELEMENT_LABELS,
+        "text_rules": {
+            "fields": [
+                {"key": key, "type": kind}
+                for key, kind in core.TEXT_RULE_FIELDS.items()
+                if key != "text"
+            ],
+            "max": MAX_TEXT_RULES,
+        },
+        "presets": core.THEME_PRESETS,
+        "page_sizes": list(PAGE_SIZES),
+        "aligns": list(core.ALIGN_CHOICES),
+        "generator_version": core_generator_version(),
+    }
+
+
+def core_generator_version() -> str:
+    from vendor.resume_builder import GENERATOR_VERSION
+
+    return GENERATOR_VERSION
 
 
 async def seed_default_theme(session: AsyncSession) -> Theme:
@@ -111,8 +270,8 @@ async def seed_default_theme(session: AsyncSession) -> Theme:
         return existing
     theme = Theme(
         name=DEFAULT_THEME_NAME,
-        description="Generator defaults (Appendix C).",
-        params=dict(core.DEFAULTS),
+        description="Generator defaults (Appendix C.2).",
+        params=validate_theme_params({}),
     )
     session.add(theme)
     await session.flush()

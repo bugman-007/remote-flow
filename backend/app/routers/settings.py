@@ -40,13 +40,15 @@ from app.schemas import (
     ThemeUpdate,
 )
 from app.serializers import provider_out, theme_out
-from app.services import events, metrics, pipeline, render, retention, settings_store, storage
+from app.services import dispatch, events, metrics, pipeline, pool, render, retention, settings_store, storage
+from app.services.broker import get_broker
 from app.services.crypto import decrypt_secret, encrypt_secret
 from app.services.llm import litellm_model_name
 from app.services.theme import (
     RENDER_FONTS,
     ThemeValidationError,
     seed_default_theme,
+    theme_editor_spec,
     theme_form_spec,
     theme_from_docx,
     validate_theme_params,
@@ -294,7 +296,37 @@ async def list_models(provider_id: str, _: User = Depends(manager_required), ses
 
 @router.get("/themes/schema")
 async def theme_schema(_: User = Depends(manager_required)):
-    return {"fields": theme_form_spec(), "defaults": core.DEFAULTS, "fonts": RENDER_FONTS}
+    """Appendix C/C.2: page fields + the element/text-rule model + presets."""
+    return {
+        "fields": theme_form_spec(),
+        "defaults": core.DEFAULTS,
+        "fonts": RENDER_FONTS,
+        "editor": theme_editor_spec(),
+    }
+
+
+@router.get("/themes/sample")
+async def theme_sample(_: User = Depends(manager_required)):
+    """The bundled specimen the editor previews live in the browser.
+
+    The block list is built by the generator itself, so the browser renders the
+    real document structure without a round trip and without an LLM call.
+    """
+    sample_path = Path(__file__).resolve().parents[2] / "vendor" / "resume_builder" / "sample.json"
+    data = json.loads(sample_path.read_text(encoding="utf-8"))
+    data["job_description"] = "Sample job description used for theme previews."
+    blocks = core.blocks_to_dicts(core.build_blocks(data))
+    return {
+        "blocks": blocks,
+        "sections": [
+            {
+                "kind": block["kind"],
+                "label": core.ELEMENT_LABELS.get(block["kind"], block["kind"]),
+                "index": index,
+            }
+            for index, block in enumerate(blocks)
+        ],
+    }
 
 
 @router.get("/themes")
@@ -531,6 +563,54 @@ async def resume_intake(
 @router.get("/system/status")
 async def system_status(_: User = Depends(manager_required), session: AsyncSession = Depends(get_session)):
     return await build_status(session)
+
+
+# ------------------------------------------------------------- llm worker pool
+
+
+@router.get("/system/pool")
+async def pool_status(_: User = Depends(manager_required), session: AsyncSession = Depends(get_session)):
+    """CONC-2: what the dynamic controller decided last, and why."""
+    settings = await settings_store.all_settings(session)
+    broker = get_broker()
+    state = await pool.load_plan(broker) or {}
+    if not state:
+        # No controller tick yet (fresh deploy, or worker-ops down): report the
+        # configured mode so the panel is never empty.
+        mode = str(settings.get("llm_pool_mode") or pool.MODE_STATIC)
+        size = int(settings.get("llm_pool_static_size") or 6)
+        state = {"state": mode, "mode": mode, "reason": "waiting for the controller's first tick",
+                 "ceiling": size if mode == pool.MODE_STATIC else int(settings.get("llm_pool_min") or 2),
+                 "budget": size if mode == pool.MODE_STATIC else 0}
+    return {
+        "state": state,
+        "settings": {key: value for key, value in settings.items() if key.startswith("llm_")},
+        "active": await pool.active_count(broker),
+        "inflight": await pool.inflight_count(broker),
+        "backlog": await pool.backlog_count(session),
+    }
+
+
+@router.post("/system/pool/apply")
+async def pool_apply(
+    request: Request,
+    user: User = Depends(manager_required),
+    session: AsyncSession = Depends(get_session),
+):
+    """Run one controller cycle now, so a settings change is visible immediately."""
+    state = await pool.tick(session)
+    session.add(
+        AuditLog(
+            actor_id=user.id,
+            action="pool.apply",
+            entity_type="system",
+            after={"mode": state.get("mode"), "ceiling": state.get("ceiling")},
+            ip=client_ip(request),
+        )
+    )
+    await session.commit()
+    await dispatch.flush_dispatches(session)
+    return state
 
 
 async def build_status(session: AsyncSession) -> dict:

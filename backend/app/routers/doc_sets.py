@@ -26,9 +26,9 @@ from app.models import (
 )
 from app.routers.common import Pagination, attempts_for_generation, files_for_generation, get_doc_set, get_job
 from app.routers.files import build_zip
-from app.schemas import BulkSelectRequest, DocSetPatch, ZipRequest
+from app.schemas import BulkDeleteRequest, BulkSelectRequest, DocSetPatch, ZipRequest
 from app.serializers import doc_set_summary, file_out, generation_out, job_out
-from app.services import dispatch, events, pipeline, release, settings_store, storage
+from app.services import dispatch, events, metrics, pipeline, purge, release, settings_store, storage
 from app.services.derived import derived_status
 from app.services.search import job_text_search_clause
 
@@ -466,6 +466,101 @@ async def bulk_select(
     )
     await session.commit()
     return {"ok": True, "updated": updated}
+
+
+def _refusal(reason: str, doc_set_id: str, details: dict) -> APIError:
+    """Turn a purge refusal into the code the Manager UI explains to the user."""
+    if reason == "has_interviews":
+        return APIError(
+            "docset_has_interviews",
+            "This resume is used by an interview; cancel or delete that interview first.",
+            status_code=409,
+            details=details,
+        )
+    if reason == "in_flight":
+        return APIError(
+            "docset_in_flight",
+            "This resume is still being built; wait for it to finish before deleting it.",
+            status_code=409,
+            details=details,
+        )
+    return APIError("not_found", f"No resume {doc_set_id}.", status_code=404, details=details)
+
+
+@router.post("/doc-sets/bulk-delete")
+async def bulk_delete_doc_sets(
+    payload: BulkDeleteRequest,
+    request: Request,
+    user: User = Depends(manager_required),
+    session: AsyncSession = Depends(get_session),
+):
+    """Permanently delete the selected resumes - rows *and* files on disk."""
+    outcome = await purge.purge_doc_sets(session, payload.ids)
+    if outcome["deleted"]:
+        session.add(
+            AuditLog(
+                actor_id=user.id,
+                action="docset.purge",
+                entity_type="doc_set",
+                after={"ids": outcome["deleted"], "bytes": outcome["bytes"]},
+                ip=client_ip(request),
+            )
+        )
+        await events.emit(
+            session,
+            audience={"user_ids": sorted(set(outcome["maker_ids"])), "roles": ["manager"]},
+            event_type="docset.purged",
+            payload={"doc_set_ids": outcome["deleted"], "bytes": outcome["bytes"]},
+        )
+        await metrics.increment(session, metrics.daily_key("purged_doc_sets"), len(outcome["deleted"]))
+        if outcome["bytes"]:
+            await metrics.increment(session, metrics.daily_key("purged_bytes"), outcome["bytes"])
+    await session.commit()
+    return {
+        "ok": True,
+        "deleted": outcome["deleted"],
+        "blocked": outcome["blocked"],
+        "bytes": outcome["bytes"],
+    }
+
+
+@router.delete("/doc-sets/{doc_set_id}")
+async def delete_doc_set(
+    doc_set_id: str,
+    request: Request,
+    confirm: bool = False,
+    user: User = Depends(manager_required),
+    session: AsyncSession = Depends(get_session),
+):
+    """Permanently delete one resume - rows *and* files on disk. Cannot be undone."""
+    doc_set = await get_doc_set(session, doc_set_id)
+    if not confirm:
+        raise APIError("confirmation_required", "Permanent deletion must be confirmed.", status_code=409)
+    outcome = await purge.purge_doc_sets(session, [doc_set.id])
+    if not outcome["deleted"]:
+        blocked = outcome["blocked"][0]
+        raise _refusal(blocked["reason"], doc_set.id, blocked)
+    session.add(
+        AuditLog(
+            actor_id=user.id,
+            action="docset.purge",
+            entity_type="doc_set",
+            entity_id=doc_set.id,
+            after={"bytes": outcome["bytes"]},
+            ip=client_ip(request),
+        )
+    )
+    await events.emit(
+        session,
+        audience={"user_ids": sorted(set(outcome["maker_ids"])), "roles": ["manager"]},
+        event_type="docset.purged",
+        payload={"doc_set_ids": outcome["deleted"], "bytes": outcome["bytes"]},
+    )
+    await metrics.increment(session, metrics.daily_key("purged_doc_sets"), 1)
+    if outcome["bytes"]:
+        await metrics.increment(session, metrics.daily_key("purged_bytes"), outcome["bytes"])
+    await session.commit()
+    return {"ok": True, "deleted": outcome["deleted"], "bytes": outcome["bytes"]}
 
 
 @router.post("/doc-sets/{doc_set_id}/regenerate")

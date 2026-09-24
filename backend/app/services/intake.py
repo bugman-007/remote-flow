@@ -172,9 +172,10 @@ async def submit_jd(
     )
     await attach_jd_tsv(session, job.id, text)
 
-    from app.services.dispatch import enqueue_after_commit
-
-    enqueue_after_commit(session, generation.id, "llm", high_priority=False)
+    # PIPE-3: ``snapshots.create_generation`` already queued this build for dispatch.
+    # Enqueueing a second time here published two identical ``run_llm`` messages per
+    # submission, and the duplicate spent a whole LLM worker slot blocked on the row
+    # lock held by the copy that was really running.
     await events.emit(
         session,
         audience=events.job_audience(maker.id),

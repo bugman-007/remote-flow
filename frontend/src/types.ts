@@ -235,18 +235,77 @@ export interface Provider {
   last_error: string | null;
 }
 
+/** One inline styling rule (Appendix C.2): text is matched case-insensitively. */
+export interface ThemeTextRule {
+  text: string;
+  bold?: boolean | null;
+  weight?: number | null;
+  italic?: boolean | null;
+  underline?: boolean | null;
+  uppercase?: boolean | null;
+  color?: string | null;
+  bg?: string | null;
+}
+
+/** Per-element style override; only the keys present are overridden. */
+export type ThemeElementStyle = Record<string, string | number | boolean | null>;
+
 export interface ThemeParams {
   font?: string;
   size?: number;
   accent?: string;
   background?: string | null;
+  bg_color?: string;
+  body_color?: string;
+  muted_color?: string;
+  bullet_glyph?: string;
+  page_size?: string;
   line_height?: number;
   section_gap?: number;
   margin_top?: number;
   margin_right?: number;
   margin_bottom?: number;
   margin_left?: number;
+  elements?: Record<string, ThemeElementStyle>;
+  text_rules?: ThemeTextRule[];
   [key: string]: unknown;
+}
+
+export interface ThemeField {
+  key: string;
+  type: string;
+  min: number | null;
+  max: number | null;
+  step: number | null;
+  default: unknown;
+  group?: string;
+  options: string[] | null;
+  font_labels: { name: string }[] | null;
+}
+
+export interface ThemeElementField {
+  key: string;
+  type: string;
+  min: number | null;
+  max: number | null;
+  step: number | null;
+}
+
+export interface ThemeEditorSpec {
+  elements: { key: string; label: string; fields: ThemeElementField[]; aligns: string[] }[];
+  element_labels: Record<string, string>;
+  text_rules: { fields: { key: string; type: string }[]; max: number };
+  presets: { key: string; name: string; params: ThemeParams }[];
+  page_sizes: string[];
+  aligns: string[];
+  generator_version: string;
+}
+
+export interface ThemeSchema {
+  fields: ThemeField[];
+  defaults: ThemeParams;
+  fonts: { name: string; pdf_substitute: string }[];
+  editor: ThemeEditorSpec;
 }
 
 export interface Theme {
@@ -420,7 +479,46 @@ export interface Settings {
   disk_warn_pct: number;
   disk_pause_intake_pct: number;
   disk_pause_render_pct: number;
+  llm_pool_mode: "static" | "dynamic";
+  llm_pool_static_size: number;
+  llm_pool_min: number;
+  llm_pool_max: number;
+  llm_grow_below_pct: number;
+  llm_admit_above_pct: number;
+  llm_shrink_above_pct: number;
+  llm_shrink_below_pct: number;
+  llm_scale_step: number;
+  llm_scale_interval_s: number;
+  llm_shrink_cooldown_s: number;
   [key: string]: unknown;
+}
+
+/** CONC-2: what the pool controller decided last, and why. */
+export interface PoolState {
+  mode?: "static" | "dynamic";
+  state: string;
+  reason?: string;
+  floor?: number;
+  ceiling?: number;
+  size?: number;
+  budget?: number;
+  active?: number;
+  inflight?: number;
+  backlog?: number;
+  memory_used_pct?: number;
+  memory_available_mb?: number;
+  memory_total_mb?: number;
+  cpu_pct?: number | null;
+  updated_at?: number;
+  applied?: boolean;
+}
+
+export interface PoolStatus {
+  state: PoolState;
+  settings: Settings;
+  active: number;
+  inflight: number;
+  backlog: number;
 }
 
 export interface RetentionPlan {

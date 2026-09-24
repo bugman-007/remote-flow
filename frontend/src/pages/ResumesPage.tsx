@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, BarChart3, Download, FileDown, Star } from "lucide-react";
+import { ArrowUp, BarChart3, Download, FileDown, Star, Trash2 } from "lucide-react";
 import { api, downloadBlob, errorMessage } from "../lib/api";
 import { useAuth } from "../auth/AuthProvider";
 import { t } from "../i18n";
 import { Badge, Button, Card, Checkbox, EmptyState, Input, Select, Spinner } from "../ui/primitives";
 import { Pager } from "../ui/table";
 import { useToast } from "../ui/toast";
+import { ConfirmDialog } from "../ui/dialog";
 import { DateSelector } from "../components/DateSelector";
 import { MultiSelect } from "../ui/MultiSelect";
 import { ResumesTable } from "./resumes/ResumesTable";
@@ -55,6 +56,7 @@ export function ResumesPage() {
   const [selection, setSelection] = useState<string[]>([]);
   const [openRow, setOpenRow] = useState<DocSetRow | null>(null);
   const [showStats, setShowStats] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const rangeActive = Boolean(state.date_from && state.date_to);
 
@@ -109,7 +111,7 @@ export function ResumesPage() {
   useEffect(
     () =>
       subscribe((event) => {
-        if (!["job.status", "job.released", "build.needs_attention", "docset.regenerated", "docset.selected"].includes(event.type)) return;
+        if (!["job.status", "job.released", "build.needs_attention", "docset.regenerated", "docset.selected", "docset.purged"].includes(event.type)) return;
         if (window.scrollY > 160) setNewRows((count) => count + 1);
       }),
     [subscribe],
@@ -161,6 +163,28 @@ export function ResumesPage() {
       await api.post("/doc-sets/bulk-select", { ids: selection, selected });
       push({ tone: "success", title: selected ? t("toast.selected", { count: selection.length }) : t("toast.unselected", { count: selection.length }) });
       setSelection([]);
+      refresh();
+    } catch (error) {
+      push({ tone: "error", title: errorMessage(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const bulkDelete = async () => {
+    if (!selection.length || busy) return;
+    setBusy("delete");
+    try {
+      const result = await api.post<{ deleted: string[]; blocked: { reason: string }[] }>("/doc-sets/bulk-delete", {
+        ids: selection,
+      });
+      push({ tone: "success", title: t("toast.deleted", { count: result.deleted.length }) });
+      if (result.blocked.length) {
+        const message = result.blocked[0].reason === "has_interviews" ? t("resumes.deletePartial", { count: result.blocked.length }) : t("resumes.deleteInFlight");
+        push({ tone: "error", title: message });
+      }
+      setSelection([]);
+      setConfirmDelete(false);
       refresh();
     } catch (error) {
       push({ tone: "error", title: errorMessage(error) });
@@ -316,6 +340,10 @@ export function ResumesPage() {
                 <Button size="sm" variant="outline" onClick={() => void bulkSelect(false)}>
                   {t("resumes.bulkUnselect")}
                 </Button>
+                <Button size="sm" variant="destructive" onClick={() => setConfirmDelete(true)}>
+                  <Trash2 className="h-3.5 w-3.5" />
+                  {t("resumes.deletePermanently")}
+                </Button>
               </>
             ) : null}
             <Button size="sm" variant="ghost" onClick={() => setSelection([])}>
@@ -370,6 +398,17 @@ export function ResumesPage() {
           refresh();
           setOpenRow(null);
         }}
+      />
+
+      <ConfirmDialog
+        open={confirmDelete}
+        destructive
+        busy={busy === "delete"}
+        title={t("resumes.deleteTitle")}
+        message={t("resumes.deleteMany", { count: selection.length })}
+        confirmLabel={t("resumes.deleteConfirmLabel")}
+        onCancel={() => setConfirmDelete(false)}
+        onConfirm={() => void bulkDelete()}
       />
     </div>
   );

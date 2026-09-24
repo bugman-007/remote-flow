@@ -127,6 +127,9 @@ async def test_intake_creates_snapshot_and_dispatch(db_session, workspace):
         assert generation.provider_id == workspace["provider"].id
         assert generation.theme_snapshot == workspace["theme"].params
         await dispatch.flush_dispatches(db_session)
-        assert recorder.calls and recorder.calls[0][0] == generation.id
+        # PIPE-3: exactly one run_llm message per submission. A second copy used to be
+        # published here, and it spent a whole LLM worker slot waiting for the claim's
+        # row lock instead of doing work.
+        assert [call[0] for call in recorder.calls] == [generation.id]
     finally:
         set_dispatcher(None)

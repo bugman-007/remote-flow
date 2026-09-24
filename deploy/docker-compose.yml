@@ -16,7 +16,10 @@ x-backend-env: &backend-env
   PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
   ENVIRONMENT: production
   COOKIE_SECURE: ${COOKIE_SECURE:-false}
-  LLM_CONCURRENCY: ${LLM_CONCURRENCY:-16}
+  # CONC-2: the llm pool is autoscaled inside [MIN, MAX]; the Manager's
+  # Static/Dynamic setting moves this range at runtime through the controller.
+  LLM_POOL_MIN: ${LLM_POOL_MIN:-2}
+  LLM_POOL_MAX: ${LLM_POOL_MAX:-8}
   RENDER_CONCURRENCY: ${RENDER_CONCURRENCY:-1}
   RB_PDF_BACKEND: ${RB_PDF_BACKEND:-unoserver}
   AUTO_CREATE_SCHEMA: "false"
@@ -80,8 +83,11 @@ services:
     # prefork, never gevent: every task drives its own asyncio event loop
     # (app.workers.runtime), and gevent's monkey-patched selectors make those
     # loops hang, so the worker acks the message without ever running it.
-    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "llm", "-c", "${LLM_CONCURRENCY:-4}", "-P", "prefork", "--prefetch-multiplier", "1", "-l", "INFO", "-n", "llm@%h"]
-    mem_limit: 1536m
+    # --autoscale (not -c): children are created on demand, so an idle box keeps
+    # only MIN alive and the controller can widen or narrow the range at runtime
+    # with `app.control.autoscale()`. billiard only ever shrinks idle children.
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "llm", "-P", "prefork", "--autoscale", "${LLM_POOL_MAX:-8},${LLM_POOL_MIN:-2}", "--prefetch-multiplier", "1", "-l", "INFO", "-n", "llm@%h"]
+    mem_limit: 2600m
     cpu_shares: 512
     stop_grace_period: 620s
 
@@ -106,7 +112,7 @@ services:
     volumes:
       - storage:/storage
     # HW-1: lowest CPU share plus nice -n 10 inside the entrypoint.
-    mem_limit: 1500m
+    mem_limit: 1200m
     cpu_shares: 256
     stop_grace_period: 200s
 
