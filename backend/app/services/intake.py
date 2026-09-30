@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from datetime import date, timedelta
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,12 +29,7 @@ class IntakeError(Exception):
 
 
 async def server_today(session: AsyncSession) -> date:
-    tz_name = await settings_store.get_setting(session, "timezone") or "UTC"
-    try:
-        tz = ZoneInfo(tz_name)
-    except Exception:  # noqa: BLE001
-        tz = ZoneInfo("UTC")
-    return utcnow().astimezone(tz).date()
+    return await settings_store.platform_today(session)
 
 
 async def active_assignment(session: AsyncSession, maker_id: str) -> ProfileAssignment | None:

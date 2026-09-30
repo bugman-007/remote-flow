@@ -35,6 +35,9 @@ const NUMBER_FIELDS: { key: (typeof KEYS)[number]; label: string; group: "size" 
   { key: "llm_shrink_cooldown_s", label: "settings.workers.cooldown", group: "advanced" },
 ];
 
+/** Advanced thresholds the async runner still uses (it has no processes to ramp or release). */
+const RUNNER_ADVANCED = new Set<(typeof KEYS)[number]>(["llm_grow_below_pct", "llm_admit_above_pct", "llm_shrink_above_pct"]);
+
 /** CONC-2: static or dynamic generation processors, plus the live controller state. */
 export function WorkersTab() {
   const { push } = useToast();
@@ -69,6 +72,14 @@ export function WorkersTab() {
 
   const mode = draft.llm_pool_mode === "dynamic" ? "dynamic" : "static";
   const state = pool.data?.state ?? { state: "unknown" };
+  // With the async runner the numbers are parallel provider calls, not processes.
+  const runner = state.executor === "runner";
+  const cap = state.hard_cap ?? undefined;
+  const label = (key: string) => t(runner ? `settings.workers.runner.${key}` : `settings.workers.${key}`);
+  const capHint = runner && cap ? t("settings.workers.runner.capHint", { cap }) : undefined;
+  const advancedFields = NUMBER_FIELDS.filter(
+    (field) => field.group === "advanced" && (!runner || RUNNER_ADVANCED.has(field.key)),
+  );
 
   const save = async () => {
     setError(null);
@@ -107,8 +118,8 @@ export function WorkersTab() {
     <div className="space-y-3">
       <Card>
         <CardHeader
-          title={t("settings.workers.title")}
-          description={t("settings.workers.intro")}
+          title={label("title")}
+          description={label("intro")}
           actions={
             <>
               <Button size="sm" variant="outline" onClick={() => void applyNow()} loading={saving}>
@@ -122,7 +133,7 @@ export function WorkersTab() {
           }
         />
         <div className="grid gap-3 tablet:grid-cols-2">
-          <Field label={t("settings.workers.mode")} hint={mode === "dynamic" ? t("settings.workers.dynamicHint") : t("settings.workers.staticHint")}>
+          <Field label={t("settings.workers.mode")} hint={mode === "dynamic" ? label("dynamicHint") : label("staticHint")}>
             <Select
               value={mode}
               onChange={(event) => setDraft({ ...draft, llm_pool_mode: event.target.value as Settings["llm_pool_mode"] })}
@@ -132,11 +143,11 @@ export function WorkersTab() {
             </Select>
           </Field>
           {mode === "static" ? (
-            <NumberField draft={draft} setDraft={setDraft} fieldKey="llm_pool_static_size" label={t("settings.workers.size")} />
+            <NumberField draft={draft} setDraft={setDraft} fieldKey="llm_pool_static_size" label={label("size")} hint={capHint} />
           ) : (
             <>
-              <NumberField draft={draft} setDraft={setDraft} fieldKey="llm_pool_min" label={t("settings.workers.min")} />
-              <NumberField draft={draft} setDraft={setDraft} fieldKey="llm_pool_max" label={t("settings.workers.max")} hint={t("settings.workers.ceilingHint")} />
+              <NumberField draft={draft} setDraft={setDraft} fieldKey="llm_pool_min" label={label("min")} />
+              <NumberField draft={draft} setDraft={setDraft} fieldKey="llm_pool_max" label={label("max")} hint={capHint ?? t("settings.workers.ceilingHint")} />
             </>
           )}
         </div>
@@ -147,8 +158,14 @@ export function WorkersTab() {
             </Button>
             {advanced ? (
               <div className="mt-2 grid gap-3 tablet:grid-cols-3">
-                {NUMBER_FIELDS.filter((field) => field.group === "advanced").map((field) => (
-                  <NumberField key={field.key} draft={draft} setDraft={setDraft} fieldKey={field.key} label={t(field.label)} />
+                {advancedFields.map((field) => (
+                  <NumberField
+                    key={field.key}
+                    draft={draft}
+                    setDraft={setDraft}
+                    fieldKey={field.key}
+                    label={runner && field.key === "llm_shrink_above_pct" ? label("shrinkAbove") : t(field.label)}
+                  />
                 ))}
               </div>
             ) : null}
@@ -175,12 +192,16 @@ export function WorkersTab() {
             <div className="grid gap-3 tablet:grid-cols-3">
               <Stat
                 icon={<Cpu className="h-3.5 w-3.5" />}
-                label={t("settings.workers.liveProcessors")}
+                label={label("liveProcessors")}
                 value={String(state.size ?? state.ceiling ?? "—")}
-                hint={t("settings.workers.liveRange", {
-                  floor: state.floor ?? "—",
-                  ceiling: state.ceiling ?? "—",
-                })}
+                hint={
+                  runner
+                    ? t("settings.workers.runner.liveRange", { floor: state.floor ?? "—", cap: cap ?? "—" })
+                    : t("settings.workers.liveRange", {
+                        floor: state.floor ?? "—",
+                        ceiling: state.ceiling ?? "—",
+                      })
+                }
               />
               <Stat icon={<Gauge className="h-3.5 w-3.5" />} label={t("settings.workers.liveActive")} value={String(state.active ?? pool.data.active)} />
               <Stat icon={<Gauge className="h-3.5 w-3.5" />} label={t("settings.workers.liveQueued")} value={String(pool.data.backlog)} />

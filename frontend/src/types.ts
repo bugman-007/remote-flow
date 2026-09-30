@@ -469,6 +469,7 @@ export interface Settings {
   llm_timeout_s: number;
   render_timeout_s: number;
   max_llm_attempts: number;
+  llm_single_request: boolean;
   max_render_attempts: number;
   show_selection_to_makers: boolean;
   default_interview_template_id: string | null;
@@ -496,6 +497,10 @@ export interface Settings {
 /** CONC-2: what the pool controller decided last, and why. */
 export interface PoolState {
   mode?: "static" | "dynamic";
+  /** Who runs the LLM stage: one prefork process per call, or the async runner. */
+  executor?: "celery" | "runner";
+  /** Runner only: the most parallel calls this server holds (LLM_RUNNER_MAX_CONCURRENCY). */
+  hard_cap?: number | null;
   state: string;
   reason?: string;
   floor?: number;

@@ -206,6 +206,13 @@ async def cmd_dispatch_sweep(args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_llm_runner(_args: argparse.Namespace) -> int:
+    """CONC-2: many provider calls in flight in one process (the ``worker-llm`` service)."""
+    from app.workers.llm_runner import main as run_llm_runner
+
+    return await run_llm_runner()
+
+
 async def cmd_expire_leases(args: argparse.Namespace) -> int:
     from app.services import dispatch, pipeline
 
@@ -909,6 +916,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("dispatch-sweep", help="re-enqueue builds the queue may have lost")
     p.set_defaults(func=cmd_dispatch_sweep)
+
+    p = sub.add_parser("llm-runner", help="run the LLM stage as one async process (LLM_EXECUTOR=runner)")
+    p.set_defaults(func=cmd_llm_runner)
 
     p = sub.add_parser("expire-leases", help="fail expired leases and apply the retry policy")
     p.set_defaults(func=cmd_expire_leases)

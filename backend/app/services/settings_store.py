@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AuditLog, Setting
+from app.utils import utcnow
+
+#: The platform's business timezone: the day boundary for sequence numbers and
+#: daily limits, and the zone every time in the UI is shown in.
+DEFAULT_TIMEZONE = "America/New_York"
 
 #: Defaults and allowed types for every general/retention/disk setting.
 SETTING_DEFAULTS: dict[str, Any] = {
     # General (SET-12)
-    "timezone": "UTC",
+    "timezone": DEFAULT_TIMEZONE,
     "default_daily_limit": 100,
     "min_jd_chars": 50,
     "max_jd_chars": 200000,
@@ -21,6 +27,9 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "render_timeout_s": 180,
     "max_llm_attempts": 10,
     "max_render_attempts": 3,
+    # One provider request per resume: no repair round, no automatic retry, no
+    # silent HTTP-level resend. A failed reply goes to Needs attention.
+    "llm_single_request": False,
     "show_selection_to_makers": True,
     "default_interview_template_id": None,
     # Retention (STO-4)
@@ -60,6 +69,7 @@ SETTING_TYPES: dict[str, type | tuple[type, ...]] = {
     "render_timeout_s": int,
     "max_llm_attempts": int,
     "max_render_attempts": int,
+    "llm_single_request": bool,
     "llm_pool_mode": str,
     "llm_pool_static_size": int,
     "llm_pool_min": int,
@@ -93,6 +103,8 @@ class SettingsError(ValueError):
 
 #: Bounds for the pool settings; enforced here so the API cannot store nonsense.
 SETTING_BOUNDS: dict[str, tuple[int, int]] = {
+    "max_llm_attempts": (1, 50),
+    "max_render_attempts": (1, 20),
     "llm_pool_static_size": (1, 32),
     "llm_pool_min": (1, 32),
     "llm_pool_max": (1, 32),
@@ -108,6 +120,21 @@ SETTING_BOUNDS: dict[str, tuple[int, int]] = {
 #: The two LLM pool modes (CONC-2).
 POOL_MODES = ("static", "dynamic")
 
+#: Pool sizes counted in parallel provider calls when the async runner runs the
+#: LLM stage (a few MB each instead of a process each). The upper bound is the
+#: provider's concurrency allowance; the runner still clamps to what the server holds.
+POOL_SIZE_KEYS = ("llm_pool_static_size", "llm_pool_min", "llm_pool_max")
+RUNNER_POOL_SIZE_BOUNDS = (1, 2500)
+
+
+def setting_bounds(key: str) -> tuple[int, int] | None:
+    if key in POOL_SIZE_KEYS:
+        from app.config import get_settings
+
+        if get_settings().llm_runner_enabled:
+            return RUNNER_POOL_SIZE_BOUNDS
+    return SETTING_BOUNDS.get(key)
+
 
 def validate_setting(key: str, value: Any) -> Any:
     if key not in SETTING_DEFAULTS:
@@ -116,10 +143,19 @@ def validate_setting(key: str, value: Any) -> Any:
         if value not in POOL_MODES:
             raise SettingsError(f"llm_pool_mode must be one of {', '.join(POOL_MODES)}")
         return value
-    if key in SETTING_BOUNDS:
+    if key == "timezone":
+        if not isinstance(value, str) or "/" not in value:
+            raise SettingsError("timezone must be a region name such as America/New_York")
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise SettingsError(f"unknown timezone: {value}") from None
+        return value
+    bounds = setting_bounds(key)
+    if bounds is not None:
         if isinstance(value, bool) or not isinstance(value, int):
             raise SettingsError(f"{key} must be an integer")
-        low, high = SETTING_BOUNDS[key]
+        low, high = bounds
         if not low <= value <= high:
             raise SettingsError(f"{key} must be between {low} and {high}")
         return value
@@ -190,6 +226,23 @@ async def set_settings(
     )
     await session.flush()
     return await all_settings(session)
+
+
+def zone(name: str | None) -> ZoneInfo:
+    try:
+        return ZoneInfo(name or DEFAULT_TIMEZONE)
+    except (ZoneInfoNotFoundError, ValueError):
+        return ZoneInfo(DEFAULT_TIMEZONE)
+
+
+async def platform_timezone(session: AsyncSession) -> ZoneInfo:
+    """The configured business timezone (Settings -> General)."""
+    return zone(await get_setting(session, "timezone"))
+
+
+async def platform_today(session: AsyncSession) -> date:
+    """Today's date in the business timezone."""
+    return utcnow().astimezone(await platform_timezone(session)).date()
 
 
 async def intake_paused(session: AsyncSession) -> tuple[bool, str | None]:

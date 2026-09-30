@@ -21,7 +21,7 @@ import { todayISO } from "../lib/format";
 import type { DocSetRow, Paginated, Profile, User } from "../types";
 
 const DEFAULTS = {
-  date: todayISO(),
+  date: "",
   date_from: "",
   date_to: "",
   status: "all",
@@ -47,7 +47,8 @@ export function ResumesPage() {
   const isManager = user?.role === "manager";
   // RES-13: makers work through their browser tabs in submission order, so default
   // their list (and therefore the download order) to submitted time.
-  const defaults = useMemo(() => ({ ...DEFAULTS, sort: isManager ? "seq" : "submitted" }), [isManager]);
+  // "Today" in the platform's timezone, known only once the user is signed in.
+  const defaults = useMemo(() => ({ ...DEFAULTS, date: todayISO(), sort: isManager ? "seq" : "submitted" }), [isManager]);
   const { state, update } = useUrlState(defaults);
   const { subscribe } = useRealtime();
   // RES-8: count live events that arrive while the list is scrolled away from the top.

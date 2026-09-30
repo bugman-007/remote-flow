@@ -16,6 +16,11 @@ pool. All processes busy!")`` rather than killing a busy one, and Celery's
 never dispatch more work than the current ceiling, so shrinking always finds an
 idle child.
 
+With ``LLM_EXECUTOR=runner`` the LLM stage runs in the async runner
+(:mod:`app.workers.llm_runner`) instead of a prefork pool: the same two modes
+then size the number of parallel provider calls (:func:`decide_runner_pool`),
+and the runner reads the budget published here on every pass.
+
 Everything here is a pure function of its inputs plus a handful of
 self-expiring Redis keys; nothing needs a schema migration.
 """
@@ -315,6 +320,76 @@ def decide_pool(
                     grew=grew)
 
 
+def decide_runner_pool(
+    *,
+    mode: str,
+    static_size: int,
+    min_size: int,
+    max_size: int,
+    hard_cap: int,
+    ceiling: int | None,
+    mem_used_pct: float,
+    active: int = 0,
+    backlog: int = 0,
+    grow_below: float = 70.0,
+    admit_above: float = 85.0,
+    shrink_above: float = 90.0,
+) -> PoolPlan:
+    """The policy for the async runner, where every number is parallel provider calls.
+
+    A call costs a few MB inside the runner instead of a ~270 MB process, so there
+    is nothing to ramp up or tear down: dynamic mode admits as many calls as are
+    waiting (between the minimum and the maximum) while memory is comfortable, and
+    stops admitting new ones when it is not. A running call is never interrupted -
+    a smaller budget only means fewer new calls start until enough have finished.
+    ``hard_cap`` is what this server's runner can hold; every number is clamped to it.
+    """
+    cap = max(1, hard_cap)
+    if mode == MODE_STATIC:
+        size = _bounded(static_size, 1, cap)
+        reason = "static size" if static_size <= cap else f"static size, capped at {cap} by this server"
+        return PoolPlan(floor=size, ceiling=size, size=size, budget=size, state="static", reason=reason)
+
+    max_size = _bounded(max_size, 1, cap)
+    min_size = _bounded(min_size, 1, max_size)
+    active = max(0, active)
+    backlog = max(0, backlog)
+    floor = min_size
+    previous = _bounded(ceiling if ceiling else floor, floor, max_size)
+
+    if mem_used_pct >= shrink_above:
+        return PoolPlan(
+            floor, floor, floor, floor, "shrinking",
+            f"memory {mem_used_pct:.0f}% >= {shrink_above:.0f}% - no new calls until running ones finish",
+        )
+    if mem_used_pct >= admit_above:
+        target = _bounded(active, floor, max_size)
+        return PoolPlan(floor, target, target, target, "holding",
+                        f"memory {mem_used_pct:.0f}% >= {admit_above:.0f}% - no new calls")
+    if backlog == 0 and active == 0:
+        return PoolPlan(floor, floor, floor, floor, "steady", "idle")
+    demand = _bounded(active + backlog, floor, max_size)
+    if mem_used_pct >= grow_below:
+        # Between the growth line and the admission line: keep what is already
+        # allowed, never more.
+        target = min(demand, max(previous, _bounded(active, floor, max_size)))
+        return PoolPlan(
+            floor, target, target, target, "holding",
+            f"memory {mem_used_pct:.0f}% >= {grow_below:.0f}% - not growing; {backlog} waiting, {active} running",
+        )
+    grew = demand > previous
+    return PoolPlan(floor, demand, demand, demand, "growing" if grew else "steady",
+                    f"memory {mem_used_pct:.0f}%, {backlog} waiting, {active} running", grew=grew)
+
+
+def settings_budget(values: dict[str, Any], *, hard_cap: int) -> int:
+    """The budget straight from the saved settings, for when no controller has ticked."""
+    mode = str(values.get("llm_pool_mode") or MODE_STATIC)
+    if mode == MODE_DYNAMIC:
+        return _bounded(_setting_int(values, "llm_pool_min", 2), 1, max(1, hard_cap))
+    return _bounded(_setting_int(values, "llm_pool_static_size", 6), 1, max(1, hard_cap))
+
+
 # ----------------------------------------------------------------- controller
 
 
@@ -367,9 +442,13 @@ def send_autoscale(ceiling: int, floor: int) -> dict[str, Any]:
 
 async def tick(session, *, broker: Broker | None = None) -> dict[str, Any]:
     """One control cycle: measure, decide, apply. Safe to run every 10 s."""
+    from app.config import get_settings
     from app.services import settings_store
     from app.services.broker import get_broker
 
+    config = get_settings()
+    runner = config.llm_runner_enabled
+    hard_cap = max(1, int(config.llm_runner_max_concurrency))
     broker = broker or get_broker()
     values = await settings_store.all_settings(session)
     mode = str(values.get("llm_pool_mode") or MODE_STATIC)
@@ -391,37 +470,58 @@ async def tick(session, *, broker: Broker | None = None) -> dict[str, Any]:
     backlog = await backlog_count(session)
     ceiling_raw = await broker.get_int(LLM_CEILING_KEY)
 
-    plan = decide_pool(
-        mode=mode,
-        static_size=_setting_int(values, "llm_pool_static_size", 6),
-        min_size=_setting_int(values, "llm_pool_min", 2),
-        max_size=_setting_int(values, "llm_pool_max", 8),
-        ceiling=ceiling_raw or None,
-        mem_used_pct=usage.mem_used_pct,
-        cpu_pct=usage.cpu_pct,
-        active=active,
-        backlog=backlog,
-        grow_below=_setting_float(values, "llm_grow_below_pct", 70),
-        admit_above=_setting_float(values, "llm_admit_above_pct", 85),
-        shrink_above=_setting_float(values, "llm_shrink_above_pct", 90),
-        shrink_below=_setting_float(values, "llm_shrink_below_pct", 80),
-        step=_setting_int(values, "llm_scale_step", 1),
-        grow_interval_s=_setting_float(values, "llm_scale_interval_s", 15),
-        shrink_cooldown_s=_setting_float(values, "llm_shrink_cooldown_s", 45),
-        since_grow_s=await _age(broker, LLM_LAST_GROW_KEY),
-        since_shrink_s=await _age(broker, LLM_LAST_SHRINK_KEY),
-    )
+    if runner:
+        plan = decide_runner_pool(
+            mode=mode,
+            static_size=_setting_int(values, "llm_pool_static_size", 6),
+            min_size=_setting_int(values, "llm_pool_min", 2),
+            max_size=_setting_int(values, "llm_pool_max", 8),
+            hard_cap=hard_cap,
+            ceiling=ceiling_raw or None,
+            mem_used_pct=usage.mem_used_pct,
+            active=active,
+            backlog=backlog,
+            grow_below=_setting_float(values, "llm_grow_below_pct", 70),
+            admit_above=_setting_float(values, "llm_admit_above_pct", 85),
+            shrink_above=_setting_float(values, "llm_shrink_above_pct", 90),
+        )
+    else:
+        plan = decide_pool(
+            mode=mode,
+            static_size=_setting_int(values, "llm_pool_static_size", 6),
+            min_size=_setting_int(values, "llm_pool_min", 2),
+            max_size=_setting_int(values, "llm_pool_max", 8),
+            ceiling=ceiling_raw or None,
+            mem_used_pct=usage.mem_used_pct,
+            cpu_pct=usage.cpu_pct,
+            active=active,
+            backlog=backlog,
+            grow_below=_setting_float(values, "llm_grow_below_pct", 70),
+            admit_above=_setting_float(values, "llm_admit_above_pct", 85),
+            shrink_above=_setting_float(values, "llm_shrink_above_pct", 90),
+            shrink_below=_setting_float(values, "llm_shrink_below_pct", 80),
+            step=_setting_int(values, "llm_scale_step", 1),
+            grow_interval_s=_setting_float(values, "llm_scale_interval_s", 15),
+            shrink_cooldown_s=_setting_float(values, "llm_shrink_cooldown_s", 45),
+            since_grow_s=await _age(broker, LLM_LAST_GROW_KEY),
+            since_shrink_s=await _age(broker, LLM_LAST_SHRINK_KEY),
+        )
 
     previous = await load_plan(broker)
     applied = False
     control: dict[str, Any] = {"sent": False}
-    changed = plan.size != (previous or {}).get("size") or plan.floor != (previous or {}).get("floor")
-    stale = await _age(broker, LLM_PUBLISHED_KEY) >= PUBLISH_KEEPALIVE_S
-    if changed or stale:
-        control = send_autoscale(plan.size, plan.floor)
-        applied = bool(control.get("sent"))
-        if applied:
-            await _stamp(broker, LLM_PUBLISHED_KEY)
+    if runner:
+        # The runner reads the budget from Redis on every pass; there is no
+        # process pool to resize.
+        applied = True
+    else:
+        changed = plan.size != (previous or {}).get("size") or plan.floor != (previous or {}).get("floor")
+        stale = await _age(broker, LLM_PUBLISHED_KEY) >= PUBLISH_KEEPALIVE_S
+        if changed or stale:
+            control = send_autoscale(plan.size, plan.floor)
+            applied = bool(control.get("sent"))
+            if applied:
+                await _stamp(broker, LLM_PUBLISHED_KEY)
     if plan.ceiling != ceiling_raw:
         await broker.set_int(LLM_CEILING_KEY, plan.ceiling, ttl_seconds=3600)
     if plan.grew:
@@ -432,6 +532,8 @@ async def tick(session, *, broker: Broker | None = None) -> dict[str, Any]:
 
     state = {
         "mode": mode,
+        "executor": "runner" if runner else "celery",
+        "hard_cap": hard_cap if runner else None,
         "state": plan.state,
         "reason": plan.reason,
         "applied": applied,

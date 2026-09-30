@@ -331,6 +331,20 @@ def _clean_data(data: Any) -> dict:
     return cleaned
 
 
+def headline(data: dict) -> str:
+    """The resume's title line under the name: ``subtitle``, else ``title``.
+
+    Profile prompts ask for the role headline in ``subtitle``; ``title`` is only
+    a fallback for replies that have no subtitle.
+    """
+    return str(data.get("subtitle") or "").strip() or str(data.get("title") or "").strip()
+
+
+def role_title(data: dict) -> str:
+    """The role alone (``DevOps Lead · Remote`` -> ``DevOps Lead``), for names and lists."""
+    return re.split(r"[·|]", headline(data))[0].strip()
+
+
 def make_names(data: dict) -> tuple[str, str]:
     """Return ``(candidate_name, docx_basename)``.
 
@@ -338,10 +352,7 @@ def make_names(data: dict) -> tuple[str, str]:
     """
     cleaned = _clean_data(data)
     name = str(cleaned.get("name") or "").strip()
-    title = str(cleaned.get("title") or "").strip()
-    if not title:
-        subtitle = str(cleaned.get("subtitle") or "")
-        title = re.split(r"[·|]", subtitle)[0].strip()
+    title = role_title(cleaned)
     name_part = dashify(name) or dashify(str(cleaned.get("target_company") or "")) or "Resume"
     title_part = dashify(title) or "Resume"
     return name, f"{name_part}_{title_part}"
@@ -664,12 +675,9 @@ def build_blocks(data: dict) -> list[Block]:
     name = str(cleaned.get("name") or "").strip()
     if name:
         blocks.append(_block("name", name))
-    title = str(cleaned.get("title") or "").strip()
-    subtitle = str(cleaned.get("subtitle") or "").strip()
+    title = headline(cleaned)
     if title:
         blocks.append(_block("title", title))
-    elif subtitle:
-        blocks.append(_block("title", subtitle))
 
     # A field the model left out (or filled with a placeholder) must never reach
     # the header - it used to print as the literal string "None".

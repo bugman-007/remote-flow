@@ -65,6 +65,24 @@ class Settings(BaseSettings):
     stats_refresh_seconds: int = 300
     #: CONC-2: how often the dynamic-pool controller measures and re-decides.
     pool_tick_seconds: int = 10
+    #: CONC-2: who runs the LLM stage. ``celery`` - one prefork child per provider
+    #: call (~270 MB each); ``runner`` - the async runner (``manage.py llm-runner``)
+    #: that keeps many calls in flight inside one process.
+    llm_executor: str = "celery"
+    #: Most provider calls one runner process keeps in flight, sized to its
+    #: container's memory limit; the Manager's number is clamped to it.
+    llm_runner_max_concurrency: int = 150
+    #: How often the runner looks for claimable builds while nothing finished.
+    llm_runner_poll_s: float = 1.0
+    #: Longest wait for a provider slot before the build is left for the next pass.
+    llm_runner_slot_wait_s: float = 5.0
+    #: How long a stopping runner lets in-flight calls finish (keep the container's
+    #: stop_grace_period above it).
+    llm_runner_drain_s: int = 600
+    #: The runner's own DB pool. Provider calls never hold a connection, so a small
+    #: pool serves hundreds of calls.
+    llm_runner_db_pool_size: int = 8
+    llm_runner_db_max_overflow: int = 8
     provider_default_max_concurrency: int = 8
     provider_default_rpm: int = 60
 
@@ -87,6 +105,11 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment.lower() in {"production", "prod"}
+
+    @property
+    def llm_runner_enabled(self) -> bool:
+        """CONC-2: the LLM stage is run by the async runner, not Celery."""
+        return (self.llm_executor or "").strip().lower() == "runner"
 
     def storage_path(self) -> Path:
         return Path(self.storage_dir).expanduser().resolve()

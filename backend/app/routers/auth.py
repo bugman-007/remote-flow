@@ -23,6 +23,7 @@ from app.security import (
 )
 from app.serializers import user_out
 from app.services import sessions as session_service
+from app.services import settings_store
 from app.services.broker import get_broker
 from app.utils import utcnow
 
@@ -70,6 +71,7 @@ async def login(
         "user": user_out(user),
         "csrf_token": csrf,
         "redirect": "/resumes" if payload.as_admin else ROLE_HOME.get(user.role, "/"),
+        "timezone": await settings_store.get_setting(session, "timezone"),
     }
 
 
@@ -99,8 +101,13 @@ async def logout(request: Request, response: Response, user: User = Depends(curr
 
 
 @router.get("/me")
-async def me(user: User = Depends(current_user)):
-    return {"user": user_out(user), "home": ROLE_HOME.get(user.role, "/")}
+async def me(user: User = Depends(current_user), session: AsyncSession = Depends(get_session)):
+    # ``timezone``: every time in the UI is shown in the platform's business timezone.
+    return {
+        "user": user_out(user),
+        "home": ROLE_HOME.get(user.role, "/"),
+        "timezone": await settings_store.get_setting(session, "timezone"),
+    }
 
 
 @router.post("/change-password")

@@ -114,7 +114,9 @@ Everything comes from environment variables (`backend/app/config.py`, sample in
 | `MASTER_KEY` | unset | base64 32 bytes; **required** in production (AES-256-GCM provider keys) |
 | `SECRET_KEY` | dev value | JWT signing; set a long random value in production |
 | `PUBLIC_URL` / `SITE_ADDRESS` / `COOKIE_SECURE` | localhost | CORS, Caddy site, cookie flags |
-| `LLM_POOL_MIN` / `LLM_POOL_MAX` | 2 / 8 | autoscale range for the llm worker (CONC-2); the Manager's Static/Dynamic setting moves it at runtime |
+| `LLM_EXECUTOR` | `runner` in deploy (`celery` in code) | who runs the LLM stage (CONC-2): `runner` = `manage.py llm-runner`, one asyncio process with many provider calls in flight; `celery` = one prefork child per call |
+| `LLM_RUNNER_MAX_CONCURRENCY` | 150 | most provider calls the runner keeps in flight; the Manager's Static/Dynamic number is clamped to it (~310 MB measured at 150) |
+| `LLM_POOL_MIN` / `LLM_POOL_MAX` | 2 / 8 | autoscale range for the prefork llm worker (`LLM_EXECUTOR=celery` only) |
 | `RENDER_CONCURRENCY` | 2 | simultaneous DOCX→PDF conversions on `worker-render` (HW-1); each costs ~1 core and ~215 MB |
 | `MAX_LLM_ATTEMPTS` / `MAX_RENDER_ATTEMPTS` | 10 / 3 | retry budgets before `needs_attention` |
 | `MOCK_LLM_FAIL_RATE` / `MOCK_RENDER_FAIL_RATE` | 0 | failure injection for chaos runs (OPS-7) |

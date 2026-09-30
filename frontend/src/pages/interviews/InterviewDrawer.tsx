@@ -6,13 +6,12 @@ import { Drawer } from "../../ui/dialog";
 import { Badge, Button, Card, CardHeader, Checkbox, ErrorNote, Field, Input, Select, Spinner, Textarea } from "../../ui/primitives";
 import { useToast } from "../../ui/toast";
 import { FileChips } from "../../components/FileChips";
-import { formatDateTime } from "../../lib/format";
+import { formatDateTime, platformTimeZone } from "../../lib/format";
 import { t } from "../../i18n";
 import type { Feedback, Interview, InterviewStatus, InterviewStep, User } from "../../types";
 import type { Paginated } from "../../types";
 
 /** INT-9: reviewers read the meeting time in a time zone they pick (EST by default). */
-const DEFAULT_TZ = "America/New_York";
 const TZ_FALLBACK = [
   "America/New_York",
   "America/Chicago",
@@ -81,16 +80,13 @@ export function InterviewDrawer({
   const data = interview.data;
   const [feedback, setFeedback] = useState<Partial<Feedback>>({});
   const [values, setValues] = useState<Record<string, unknown>>({});
-  const [timeZone, setTimeZone] = useState(DEFAULT_TZ);
-  const [tzTouched, setTzTouched] = useState(false);
+  // Meetings are shown in the platform's timezone; the picker below can switch it.
+  const [timeZone, setTimeZone] = useState(platformTimeZone);
   const [nextStepId, setNextStepId] = useState("");
   const [nextStepReviewer, setNextStepReviewer] = useState("");
   const [stepBusy, setStepBusy] = useState(false);
   const zones = useMemo(() => timeZones(), []);
 
-  useEffect(() => {
-    if (!tzTouched && data?.meeting_tz) setTimeZone(data.meeting_tz);
-  }, [data?.meeting_tz, tzTouched]);
 
   useEffect(() => {
     if (data?.feedback) setFeedback(data.feedback);
@@ -245,10 +241,7 @@ export function InterviewDrawer({
                   <Select
                     className="h-8 w-64 text-xs"
                     value={timeZone}
-                    onChange={(event) => {
-                      setTzTouched(true);
-                      setTimeZone(event.target.value);
-                    }}
+                    onChange={(event) => setTimeZone(event.target.value)}
                   >
                     {zones.map((zone) => (
                       <option key={zone} value={zone}>

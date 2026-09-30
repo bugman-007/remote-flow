@@ -572,6 +572,7 @@ async def system_status(_: User = Depends(manager_required), session: AsyncSessi
 async def pool_status(_: User = Depends(manager_required), session: AsyncSession = Depends(get_session)):
     """CONC-2: what the dynamic controller decided last, and why."""
     settings = await settings_store.all_settings(session)
+    config = get_settings()
     broker = get_broker()
     state = await pool.load_plan(broker) or {}
     if not state:
@@ -582,6 +583,8 @@ async def pool_status(_: User = Depends(manager_required), session: AsyncSession
         state = {"state": mode, "mode": mode, "reason": "waiting for the controller's first tick",
                  "ceiling": size if mode == pool.MODE_STATIC else int(settings.get("llm_pool_min") or 2),
                  "budget": size if mode == pool.MODE_STATIC else 0}
+    state.setdefault("executor", "runner" if config.llm_runner_enabled else "celery")
+    state.setdefault("hard_cap", config.llm_runner_max_concurrency if config.llm_runner_enabled else None)
     return {
         "state": state,
         "settings": {key: value for key, value in settings.items() if key.startswith("llm_")},

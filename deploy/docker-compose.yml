@@ -20,10 +20,18 @@ x-backend-env: &backend-env
   # Static/Dynamic setting moves this range at runtime through the controller.
   LLM_POOL_MIN: ${LLM_POOL_MIN:-2}
   LLM_POOL_MAX: ${LLM_POOL_MAX:-8}
+  # CONC-2: who runs the LLM stage. `runner` = one asyncio process (worker-llm)
+  # with many provider calls in flight; `celery` = the old prefork pool (rollback).
+  # Every service must agree: the API and the sweeps decide whether LLM work is
+  # published to a queue or read from the database by the runner.
+  LLM_EXECUTOR: ${LLM_EXECUTOR:-runner}
+  # Most provider calls the runner keeps in flight; the Manager's Processors
+  # setting is clamped to it. Measured: ~310 MB for 150 calls in flight.
+  LLM_RUNNER_MAX_CONCURRENCY: ${LLM_RUNNER_MAX_CONCURRENCY:-150}
   RENDER_CONCURRENCY: ${RENDER_CONCURRENCY:-1}
   RB_PDF_BACKEND: ${RB_PDF_BACKEND:-unoserver}
   AUTO_CREATE_SCHEMA: "false"
-  TZ: ${CONTAINER_TZ:-UTC}
+  TZ: ${CONTAINER_TZ:-America/New_York}
 
 x-backend-base: &backend-base
   build:
@@ -80,18 +88,27 @@ services:
     <<: *backend-base
     environment:
       <<: *backend-env
-    # prefork, never gevent: every task drives its own asyncio event loop
-    # (app.workers.runtime), and gevent's monkey-patched selectors make those
-    # loops hang, so the worker acks the message without ever running it.
-    # --autoscale (not -c): children are created on demand, so an idle box keeps
-    # only MIN alive and the controller can widen or narrow the range at runtime
-    # with `app.control.autoscale()`. billiard only ever shrinks idle children.
-    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "llm", "-P", "prefork", "--autoscale", "${LLM_POOL_MAX:-8},${LLM_POOL_MIN:-2}", "--prefetch-multiplier", "1", "-l", "INFO", "-n", "llm@%h"]
-    # ~270 MB per autoscaled child (measured): a container that hits this limit
-    # gets its children OOM-killed, which costs the in-flight provider calls.
-    # Sized for the Settings -> Processors maximum of 10, so the memory-driven
-    # controller - not the cgroup - is what stops the growth.
-    mem_limit: 3072m
+    # LLM_EXECUTOR=runner (default): `manage.py llm-runner`, one asyncio process
+    # that keeps up to LLM_RUNNER_MAX_CONCURRENCY provider calls in flight. A call
+    # waits on the provider ~99 % of the time, so it costs a few MB here instead
+    # of a ~270 MB prefork child. On SIGTERM it stops starting calls and lets the
+    # running ones finish (stop_grace_period covers the 600 s provider timeout).
+    #
+    # LLM_EXECUTOR=celery (rollback): the prefork pool. Never gevent - every task
+    # drives its own asyncio loop and gevent's patched selectors hang them.
+    # --autoscale lets the pool controller resize it; it needs ~270 MB per child,
+    # so also set LLM_WORKER_MEM_LIMIT=3072m.
+    command:
+      - sh
+      - -c
+      - >-
+        if [ "$${LLM_EXECUTOR:-runner}" = "celery" ]; then
+        exec celery -A app.workers.celery_app.celery_app worker -Q llm -P prefork
+        --autoscale "$${LLM_POOL_MAX:-8},$${LLM_POOL_MIN:-2}" --prefetch-multiplier 1 -l INFO -n "llm@%h";
+        else exec python manage.py llm-runner; fi
+    # Runner: ~310 MB measured with 150 calls in flight (fake provider returning
+    # production-sized responses), ~2.5x headroom.
+    mem_limit: ${LLM_WORKER_MEM_LIMIT:-768m}
     cpu_shares: 512
     stop_grace_period: 620s
 

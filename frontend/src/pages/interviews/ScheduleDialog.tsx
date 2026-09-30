@@ -5,7 +5,7 @@ import { Dialog } from "../../ui/dialog";
 import { Button, Checkbox, ErrorNote, Field, Input, Select, Textarea } from "../../ui/primitives";
 import { useToast } from "../../ui/toast";
 import { t } from "../../i18n";
-import { todayISO } from "../../lib/format";
+import { platformTimeZone, todayISO } from "../../lib/format";
 import type { InterviewStep, InterviewTemplate, InterviewTemplateField, Paginated, User } from "../../types";
 
 /** INT-3: fields the dialog renders itself, so templates must not duplicate them. */
@@ -83,7 +83,7 @@ export function ScheduleDialog({ open, docSetId, onClose, onCreated }: Props) {
           meeting_end_time: endTime || null,
         },
         meeting_at: `${meetingDate}T${startTime.length === 5 ? `${startTime}:00` : startTime}`,
-        meeting_tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        meeting_tz: platformTimeZone(),
       });
       push({ tone: "success", title: t("interviews.saved") });
       onCreated();

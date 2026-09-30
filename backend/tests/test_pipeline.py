@@ -390,3 +390,29 @@ async def test_a_withdrawn_build_is_not_resurrected_when_the_attempt_then_fails(
         assert client.calls == 0, "the client is never reached: the build was withdrawn first"
     finally:
         set_client_override(None)
+
+
+@pytest.mark.asyncio
+async def test_a_reply_with_only_a_subtitle_passes_on_the_first_call(db_session, workspace):
+    """Profile prompts ask for ``subtitle``; the reply must not be sent back for a missing ``title``."""
+    from app.services import release
+
+    raw = (
+        '{"name":"Ada","subtitle":"Staff Platform Engineer · Remote","company":"Acme","summary":"s",'
+        '"experience":[{"title":"Engineer","company":"Acme","bullets":["b"]}]}'
+    )
+    client = FixedClient(raw)
+    set_client_override(client)
+    try:
+        job = await submit(db_session, workspace["maker"], "We are hiring a platform engineer at Acme to run our cloud.")
+        await run_pipeline()
+    finally:
+        set_client_override(None)
+    assert client.calls == 1, "no repair round"
+    generation = await initial_build(db_session, job)
+    await db_session.refresh(generation)
+    assert generation.status == "ready"
+    doc_set = await release.doc_set_for_job(db_session, job.id)
+    await db_session.refresh(doc_set)
+    assert doc_set.job_title == "Staff Platform Engineer"
+    assert doc_set.docx_basename == "Ada_Staff-Platform-Engineer"

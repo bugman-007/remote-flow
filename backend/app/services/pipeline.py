@@ -33,6 +33,7 @@ from app.services import pool
 from app.services.broker import Broker, get_broker
 from app.services.dispatch import enqueue_after_commit
 from app.services.llm import (
+    REPAIR_ROUNDS,
     LLMError,
     LLMResult,
     ProviderConfig,
@@ -218,6 +219,28 @@ async def lease_update(session: AsyncSession, generation_id: str, token: str, **
     return result.rowcount == 1
 
 
+async def attempt_budget(session: AsyncSession, stage: str) -> int:
+    """How many attempts a stage gets before Needs attention.
+
+    The Manager's numbers (Settings -> General) apply, never above the server's
+    ``MAX_LLM_ATTEMPTS``/``MAX_RENDER_ATTEMPTS``. "One LLM request per resume"
+    makes the LLM budget exactly one.
+    """
+    settings = get_settings()
+    values = await settings_store.all_settings(session)
+    if stage == "llm":
+        if values.get("llm_single_request"):
+            return 1
+        cap, key = settings.max_llm_attempts, "max_llm_attempts"
+    else:
+        cap, key = settings.max_render_attempts, "max_render_attempts"
+    try:
+        chosen = int(values.get(key) or cap)
+    except (TypeError, ValueError):
+        chosen = cap
+    return max(1, min(chosen, cap))
+
+
 async def budget_used(session: AsyncSession, generation: Generation, stage: str) -> int:
     count = (
         await session.execute(
@@ -258,7 +281,6 @@ async def record_failure(
     retry_after_s: int | None = None,
 ) -> str:
     """PIPE-4/5: apply the stage-aware retry policy and return the new build status."""
-    settings = get_settings()
     stage = claim.stage
     moment = now()
     if stage == "llm":
@@ -297,7 +319,7 @@ async def record_failure(
         generation.consecutive_provider_errors = 0
 
     used = await budget_used(session, generation, stage)
-    budget = settings.max_llm_attempts if stage == "llm" else settings.max_render_attempts
+    budget = await attempt_budget(session, stage)
     if used >= budget:
         generation.status = "needs_attention"
         generation.stage = stage
@@ -399,7 +421,7 @@ async def emit_build_event(session: AsyncSession, generation: Generation, event_
 # ------------------------------------------------------------------ provider IO
 
 
-async def acquire_provider_slot(broker: Broker, provider: LLMProvider) -> str | None:
+async def acquire_provider_slot(broker: Broker, provider: LLMProvider, *, wait_s: float | None = None) -> str | None:
     """CONC-3: semaphore + request-per-minute bucket, acquired before the claim.
 
     The slot marker outlives the call (``timeout_s + grace``), so it is a true
@@ -409,7 +431,10 @@ async def acquire_provider_slot(broker: Broker, provider: LLMProvider) -> str | 
     key = f"rf:provider:{provider.id}:slots"
     ttl = float(provider.timeout_s) + 120.0
     token = await broker.acquire_slot(
-        key, limit=provider_slot_limit(provider), timeout_s=provider.timeout_s, ttl_s=ttl
+        key,
+        limit=provider_slot_limit(provider),
+        timeout_s=provider.timeout_s if wait_s is None else wait_s,
+        ttl_s=ttl,
     )
     if token is None:
         return None
@@ -500,7 +525,21 @@ async def llm_json_path(session: AsyncSession, generation: Generation) -> Path |
 # ----------------------------------------------------------------- execution
 
 
-async def execute_llm_attempt(session: AsyncSession, generation_id: str, *, worker: str = "worker-llm") -> str | None:
+async def execute_llm_attempt(
+    session: AsyncSession,
+    generation_id: str,
+    *,
+    worker: str = "worker-llm",
+    admission: bool = True,
+    slot_wait_s: float | None = None,
+) -> str | None:
+    """One LLM attempt: admission, provider slot, claim, call, then hand over to render.
+
+    ``admission=False`` is for the async runner, which is the admission gate
+    itself; the call is still counted as running for the Processors panel.
+    ``slot_wait_s`` bounds the wait for a provider slot (default: the provider's
+    timeout).
+    """
     settings = get_settings()
     generation = await load_generation(session, generation_id)
     if generation is None or generation.stage != "llm":
@@ -519,18 +558,25 @@ async def execute_llm_attempt(session: AsyncSession, generation_id: str, *, work
         )
         logger.warning("llm attempt failed before call", extra={"generation_id": generation_id})
         return result
+    # Settings -> General: "one LLM request per resume" - no repair round and no
+    # resend of any kind; a failed reply goes straight to Needs attention.
+    single_request = bool(await settings_store.get_setting(session, "llm_single_request"))
+    config.resend = not single_request
+    # Nothing has been written yet: end the read transaction so no database
+    # connection is held while this attempt waits for admission or a provider slot.
+    await session.commit()
 
     # CONC-2: admission control. The dynamic pool controller publishes a budget
     # in Redis; a build that cannot get a slot is left for ``dispatch_sweep``
     # instead of being re-published here, which would spin the queue.
-    budget = await pool.get_budget(broker, fallback=0)
+    budget = await pool.get_budget(broker, fallback=0) if admission else 0
     active_token = await pool.begin_active(broker, budget=budget, ttl_s=settings.llm_timeout_s + 300)
     if active_token is None:
         await defer_llm_dispatch(session, generation_id)
         return None
     provider_token: str | None = None
     try:
-        provider_token = await acquire_provider_slot(broker, provider)
+        provider_token = await acquire_provider_slot(broker, provider, wait_s=slot_wait_s)
         if provider_token is None:
             enqueue_after_commit(session, generation_id, "llm", high_priority=True)
             return None
@@ -553,11 +599,20 @@ async def execute_llm_attempt(session: AsyncSession, generation_id: str, *, work
             "prompt_version_id": generation.prompt_version_id,
             "attempt": claim.attempt_no,
             "jd_chars": len(job.jd_text) if job else 0,
+            "single_request": single_request,
         }
+        # CONC-2: the provider call takes minutes and touches no rows, so its
+        # connection goes back to the pool first. Holding one per call capped the
+        # number of parallel calls at the database's connection limit.
+        await session.commit()
         client = make_client(config)
         try:
             canonical, raw, call_log = await generate_resume(
-                client, provider=config, profile_prompt=profile_prompt, jd_text=job.jd_text if job else ""
+                client,
+                provider=config,
+                profile_prompt=profile_prompt,
+                jd_text=job.jd_text if job else "",
+                repair_rounds=0 if single_request else REPAIR_ROUNDS,
             )
             canonical = inject_job_description(canonical, job.jd_text if job else "")
         except LLMError as exc:
@@ -786,10 +841,14 @@ async def dispatch_sweep(session: AsyncSession, *, stale_after_s: int = 120) -> 
     """PIPE-3: re-enqueue work the queue may have lost."""
     moment = now()
     stale_cutoff = moment - timedelta(seconds=stale_after_s)
+    # CONC-2: with the async runner the LLM stage has no queue to lose work from
+    # (the runner reads the database), so only render work is re-dispatched.
+    stages = ("render",) if get_settings().llm_runner_enabled else ("llm", "render")
     rows = (
         await session.execute(
             select(Generation)
             .where(
+                Generation.stage.in_(stages),
                 Generation.status.in_(("queued", "rendering", "retry_wait")),
                 or_(Generation.next_retry_at.is_(None), Generation.next_retry_at <= moment),
                 Generation.dispatch_state == "pending",
@@ -802,6 +861,7 @@ async def dispatch_sweep(session: AsyncSession, *, stale_after_s: int = 120) -> 
         await session.execute(
             select(Generation)
             .where(
+                Generation.stage.in_(stages),
                 Generation.status.in_(("queued", "rendering", "retry_wait")),
                 or_(Generation.next_retry_at.is_(None), Generation.next_retry_at <= moment),
                 Generation.dispatch_state == "sent",

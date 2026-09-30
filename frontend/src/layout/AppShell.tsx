@@ -22,7 +22,7 @@ import { ConnectionIndicator } from "../components/ConnectionIndicator";
 import { GlobalLoadingBar } from "../components/GlobalLoadingBar";
 import { ChangePasswordDialog } from "../pages/ChangePasswordDialog";
 import type { Role } from "../types";
-import { initials } from "../lib/format";
+import { formatTime, initials } from "../lib/format";
 
 interface NavItem {
   to: string;
@@ -34,7 +34,6 @@ const NAV: Record<Role, NavItem[]> = {
   maker: [
     { to: "/jd-upload", label: t("nav.jdUpload"), icon: FormInput },
     { to: "/resumes", label: t("nav.resumes"), icon: FileText },
-    { to: "/my-profile", label: t("nav.myProfile"), icon: UserCog },
   ],
   manager: [
     { to: "/resumes", label: t("nav.resumes"), icon: FileText },
@@ -147,7 +146,7 @@ export function AppShell() {
           </button>
           {lastEventAt ? (
             <p className="mt-1 px-2 text-[10px] text-muted-foreground">
-              {t("connection.live")} · {new Date(lastEventAt).toLocaleTimeString()}
+              {t("connection.live")} · {formatTime(lastEventAt)}
             </p>
           ) : null}
         </div>

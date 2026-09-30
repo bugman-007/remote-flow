@@ -39,6 +39,17 @@ def test_make_names_falls_back_to_subtitle_and_slugifies():
     assert basename == "AB_DevOps-Lead"
 
 
+def test_the_subtitle_is_the_resume_title_even_when_a_title_is_present():
+    data = {"name": "Ada Lovelace", "title": "Software Engineer", "subtitle": "Senior Backend Engineer | Remote"}
+    assert core.headline(data) == "Senior Backend Engineer | Remote"
+    assert core.role_title(data) == "Senior Backend Engineer"
+    assert core.make_names(data) == ("Ada Lovelace", "Ada-Lovelace_Senior-Backend-Engineer")
+    header = next(block for block in core.build_blocks(data) if block.kind == "title")
+    assert "".join(run.text for run in header.runs) == "Senior Backend Engineer | Remote"
+    fallback = {"name": "Ada Lovelace", "title": "Software Engineer"}
+    assert core.make_names(fallback)[1] == "Ada-Lovelace_Software-Engineer"
+
+
 def test_highlight_parsing_supports_span_suffix_and_markdown():
     runs = core.parse_highlights("a [highlight]b[/highlight] c**d** e[highlight]")
     assert [run.text for run in runs] == ["a ", "b", " c", "d", " ", "e"]
