@@ -15,6 +15,12 @@ BUILD_STATUS_LABELS = {
 }
 
 
+SKIP_REASON_LABELS = {
+    "duplicate": "Skipped · duplicate",
+    "failed": "Skipped · failed",
+}
+
+
 def derived_status(
     job: Job,
     initial: Generation | None,
@@ -41,7 +47,15 @@ def derived_status(
         # same way, so the delivery state stays `skipped`.
         if job.skipped_by and job.skipped_by == job.maker_id:
             return {"status": "cancelled", "label": "Cancelled", "generation": 0, "stage": None, "attempt": None}
-        return {"status": "skipped", "label": "Skipped", "generation": 0, "stage": None, "attempt": None}
+        out = {"status": "skipped", "label": "Skipped", "generation": 0, "stage": None, "attempt": None}
+        if job.skip_reason:
+            # Skipped by the system itself: a duplicate JD, or a build that failed.
+            out["skip_reason"] = job.skip_reason
+            out["label"] = SKIP_REASON_LABELS.get(job.skip_reason, "Skipped")
+            if job.skip_reason == "failed" and initial is not None and initial.status == "needs_attention":
+                out["error"] = initial.last_error_message
+                out["error_code"] = initial.last_error_code
+        return out
 
     if initial is None:
         return {"status": "queued", "label": "Queued", "generation": 0, "stage": "llm", "attempt": 0}

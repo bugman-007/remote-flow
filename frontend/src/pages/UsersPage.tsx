@@ -71,7 +71,7 @@ export function UsersPage() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-lg font-semibold">{t("users.title")}</h1>
+          <h1 className="rf-page-title">{t("users.title")}</h1>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Input

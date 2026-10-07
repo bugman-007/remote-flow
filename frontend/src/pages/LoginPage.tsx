@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
-import { KeyRound } from "lucide-react";
+import { KeyRound, Sparkles } from "lucide-react";
 import { ROLE_HOME, useAuth } from "../auth/AuthProvider";
 import { Button, Card, ErrorNote, Field, Input } from "../ui/primitives";
 import { errorMessage } from "../lib/api";
@@ -38,14 +38,29 @@ export function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-muted/40 p-4">
-      <Card className="w-full max-w-sm">
-        <div className="mb-4 flex items-center gap-2">
-          <span className="flex h-9 w-9 items-center justify-center rounded-full bg-primary/10 text-primary">
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background p-4">
+      <div className="pointer-events-none absolute -right-40 -top-40 h-[32rem] w-[32rem] rounded-full bg-primary/10 blur-3xl" />
+      <div className="relative grid w-full max-w-4xl gap-4 tablet:grid-cols-[1.1fr_1fr]">
+        <div className="rf-glow-panel hidden flex-col justify-between p-8 tablet:flex">
+          <div className="flex items-center gap-3">
+            <span className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-glow">
+              <Sparkles className="h-4 w-4" />
+            </span>
+            <span className="text-base font-semibold tracking-tight">{t("app.name")}</span>
+          </div>
+          <div>
+            <h2 className="text-3xl font-normal leading-tight tracking-tight">{t("login.heroTitle")}</h2>
+            <p className="mt-3 max-w-sm text-sm text-muted-foreground">{t("login.heroBody")}</p>
+          </div>
+          <p className="text-xs text-muted-foreground">{t("app.tagline")}</p>
+        </div>
+        <Card className="w-full p-7">
+        <div className="mb-6 flex items-center gap-3">
+          <span className="flex h-10 w-10 items-center justify-center rounded-md border border-border bg-surface text-primary">
             <KeyRound className="h-4 w-4" />
           </span>
           <div>
-            <h1 className="text-sm font-semibold">{t("login.title")}</h1>
+            <h1 className="text-xl font-normal tracking-tight">{t("login.title")}</h1>
             <p className="text-xs text-muted-foreground">{t("login.subtitle")}</p>
           </div>
         </div>
@@ -94,8 +109,9 @@ export function LoginPage() {
             </Button>
           </div>
         </form>
-        <p className="mt-4 text-center text-xs text-muted-foreground">{t("login.contact")}</p>
-      </Card>
+        <p className="mt-5 text-center text-xs text-muted-foreground">{t("login.contact")}</p>
+        </Card>
+      </div>
     </div>
   );
 }

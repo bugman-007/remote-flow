@@ -146,6 +146,16 @@ class RefreshToken(PkMixin, Base):
 # ------------------------------------------------------------------- profiles
 
 
+class ProfileGroup(PkMixin, Base):
+    """PRO-11: a named set of Profiles (Bulk Resumes can target a whole group)."""
+
+    __tablename__ = "profile_groups"
+
+    name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    color: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_by: Mapped[str | None] = mapped_column(GUID, ForeignKey("users.id"))
+
+
 class Profile(PkMixin, Base):
     __tablename__ = "profiles"
 
@@ -166,6 +176,10 @@ class Profile(PkMixin, Base):
         enum_col("active", "archived", name="profile_status"), default="active", nullable=False
     )
     active_prompt_version_id: Mapped[str | None] = mapped_column(GUID, ForeignKey("prompt_versions.id"))
+    #: PRO-11: at most one group per Profile.
+    group_id: Mapped[str | None] = mapped_column(
+        GUID, ForeignKey("profile_groups.id", ondelete="SET NULL"), index=True
+    )
 
     prompt_versions: Mapped[list["PromptVersion"]] = relationship(
         back_populates="profile", foreign_keys="PromptVersion.profile_id", order_by="PromptVersion.version_no"
@@ -248,6 +262,21 @@ class Theme(PkMixin, Base):
 # ------------------------------------------------------------- jobs & pipeline
 
 
+class BulkBatch(PkMixin, Base):
+    """BULK-1: one uploaded Bulk Resumes CSV and what was generated from it."""
+
+    __tablename__ = "bulk_batches"
+
+    created_by: Mapped[str | None] = mapped_column(GUID, ForeignKey("users.id"))
+    filename: Mapped[str | None] = mapped_column(String(300))
+    #: Usable rows in CSV order: ``[{"row": 2, "job_link": ..., "jd": ...}]``.
+    rows: Mapped[list] = mapped_column(JSONType, default=list, nullable=False)
+    #: Rows left out at upload time: ``[{"row": 5, "reason": "missing JD"}]``.
+    rejected: Mapped[list] = mapped_column(JSONType, default=list, nullable=False)
+    generated_at: Mapped[datetime | None] = mapped_column(DateTimeTZ)
+    summary: Mapped[dict | None] = mapped_column(JSONType)
+
+
 class Job(PkMixin, Base):
     __tablename__ = "jobs"
     __table_args__ = (
@@ -284,6 +313,16 @@ class Job(PkMixin, Base):
     skipped_by: Mapped[str | None] = mapped_column(GUID, ForeignKey("users.id"))
     initial_generation_id: Mapped[str | None] = mapped_column(GUID)
     jd_tsv: Mapped[str | None] = mapped_column(Text)
+    #: BULK-1: ``manual`` (JD Upload) or ``bulk`` (Bulk Resumes CSV).
+    source: Mapped[str] = mapped_column(
+        enum_col("manual", "bulk", name="job_source"), default="manual", nullable=False
+    )
+    #: The posting URL from the Bulk Resumes CSV ("Open Job Link"); manual JDs have none.
+    job_link: Mapped[str | None] = mapped_column(String(2000))
+    bulk_batch_id: Mapped[str | None] = mapped_column(GUID, ForeignKey("bulk_batches.id"), index=True)
+    #: Why the system skipped this job by itself (``duplicate``/``failed``); None for
+    #: a Manager's skip or a Maker's cancel.
+    skip_reason: Mapped[str | None] = mapped_column(String(40))
 
     maker: Mapped[User] = relationship(back_populates="jobs", foreign_keys=[maker_id])
     doc_set: Mapped["DocSet | None"] = relationship(back_populates="job", uselist=False)

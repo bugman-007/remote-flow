@@ -1,7 +1,7 @@
-// UI-4: follow the OS preference unless the user picked a mode.
+// UI-4: dark by default; "system" follows the OS, and a picked mode sticks.
 try {
   var stored = localStorage.getItem("rf.theme");
-  var dark = stored ? stored === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+  var dark = stored === "light" ? false : stored === "system" ? window.matchMedia("(prefers-color-scheme: dark)").matches : true;
   document.documentElement.classList.toggle("dark", dark);
 } catch (_) {}
 

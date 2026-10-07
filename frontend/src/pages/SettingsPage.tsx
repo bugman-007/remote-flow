@@ -27,7 +27,7 @@ export function SettingsPage() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-lg font-semibold">{t("settings.title")}</h1>
+      <h1 className="rf-page-title">{t("settings.title")}</h1>
       <Tabs
         items={[
           { id: "providers", label: t("settings.tabs.providers") },

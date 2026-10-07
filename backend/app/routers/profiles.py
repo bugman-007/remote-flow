@@ -17,6 +17,7 @@ from app.models import (
     Job,
     Profile,
     ProfileAssignment,
+    ProfileGroup,
     PromptVersion,
     LLMProvider,
     Theme,
@@ -66,8 +67,10 @@ async def _out(session: AsyncSession, profile: Profile) -> dict:
         if profile.active_prompt_version_id
         else None
     )
+    group = await session.get(ProfileGroup, profile.group_id) if profile.group_id else None
     return profile_out(
         profile,
+        group=group,
         maker_count=int(maker_count or 0),
         doc_set_count=int(doc_set_count or 0),
         theme_name=theme.name if theme else None,

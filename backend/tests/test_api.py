@@ -237,24 +237,28 @@ async def test_ordered_release_over_the_api_keeps_submission_order(api, workspac
     finally:
         set_client_override(None)
 
-    listing = await maker.get("/api/v1/doc-sets", params={"date": date.today().isoformat()})
-    rows = {row["seq_no"]: row for row in listing.json()["items"]}
-    assert rows[1]["status"]["status"] == "released"
-    assert rows[2]["status"]["status"] == "needs_attention"
-    assert rows[3]["status"]["status"] == "waiting"
-    assert rows[3]["status"]["blocker_seq"] == 2
-
-    # Manager skips the blocker; everything ready behind it releases in order.
-    manager = await api.login("manager@example.com", workspace["password"])
-    job_id = rows[2]["id"]
-    skipped = await manager.post(f"/api/v1/jobs/{job_id}/skip")
-    assert skipped.status_code == 200, skipped.text
-
+    # Build 2 failed: it is skipped automatically, so 3 is not held back behind it.
     listing = await maker.get("/api/v1/doc-sets", params={"date": date.today().isoformat()})
     rows = {row["seq_no"]: row for row in listing.json()["items"]}
     assert rows[1]["status"]["status"] == "released"
     assert rows[2]["status"]["status"] == "skipped"
+    assert rows[2]["status"]["skip_reason"] == "failed"
+    assert rows[2]["status"]["label"] == "Skipped · failed"
     assert rows[3]["status"]["status"] == "released"
+
+    # The Manager can still retry the failed one; it is delivered late (ORD-9).
+    manager = await api.login("manager@example.com", workspace["password"])
+    set_client_override(Client())
+    try:
+        retried = await manager.post(f"/api/v1/jobs/{rows[2]['id']}/retry", json={"mode": "new_llm_call"})
+        assert retried.status_code == 200, retried.text
+        await run_pipeline()
+    finally:
+        set_client_override(None)
+    listing = await maker.get("/api/v1/doc-sets", params={"date": date.today().isoformat()})
+    rows = {row["seq_no"]: row for row in listing.json()["items"]}
+    assert [rows[n]["status"]["status"] for n in (1, 2, 3)] == ["released", "released", "released"]
+    assert rows[2]["status"]["released_late"] is True
 
 
 @pytest.mark.asyncio

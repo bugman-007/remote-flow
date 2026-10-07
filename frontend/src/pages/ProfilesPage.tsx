@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, FileDown, Plus, Save, UserPlus } from "lucide-react";
+import { Archive, FileDown, Layers, Plus, Save, Tags, UserPlus } from "lucide-react";
 import { api, downloadBlob, errorMessage } from "../lib/api";
 import { t } from "../i18n";
 import { Badge, Button, Card, CardHeader, Checkbox, EmptyState, ErrorNote, Field, Input, Select, Spinner, Textarea } from "../ui/primitives";
@@ -9,7 +9,9 @@ import { Table } from "../ui/table";
 import { useToast } from "../ui/toast";
 import { formatDate, formatDateTime } from "../lib/format";
 import { downloadText, parseList } from "../lib/utils";
-import type { Paginated, Profile, PromptVersion, Theme, User } from "../types";
+import type { Paginated, Profile, ProfileGroup, PromptVersion, Theme, User } from "../types";
+import { GroupChip } from "../components/GroupChip";
+import { ManageGroupsDialog, SaveGroupDialog } from "./profiles/GroupDialogs";
 
 const SHAREABLE = ["Name", "URL", "Information", "Tags"];
 
@@ -19,24 +21,68 @@ export function ProfilesPage() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [search, setSearch] = useState("");
+  // PRO-11: "Make a group" turns the rows into a checklist until the group is saved.
+  const [grouping, setGrouping] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [savingGroup, setSavingGroup] = useState(false);
+  const [managingGroups, setManagingGroups] = useState(false);
 
   const profiles = useQuery({
     queryKey: ["profiles", { q: search }],
     queryFn: () => api.get<{ items: Profile[] }>("/profiles", { q: search || undefined }),
   });
+  const groups = useQuery({
+    queryKey: ["profile-groups"],
+    queryFn: () => api.get<{ items: ProfileGroup[] }>("/profile-groups"),
+  });
 
   const refresh = () => void queryClient.invalidateQueries({ queryKey: ["profiles"] });
+  const refreshGroups = () => {
+    void queryClient.invalidateQueries({ queryKey: ["profile-groups"] });
+    refresh();
+  };
   const rows = profiles.data?.items ?? [];
+  const togglePicked = (profileId: string) =>
+    setPicked((current) => {
+      const next = new Set(current);
+      if (next.has(profileId)) next.delete(profileId);
+      else next.add(profileId);
+      return next;
+    });
+  const stopGrouping = () => {
+    setGrouping(false);
+    setPicked(new Set());
+  };
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-lg font-semibold">{t("profiles.title")}</h1>
+          <h1 className="rf-page-title">{t("profiles.title")}</h1>
           <p className="text-sm text-muted-foreground">{t("profiles.snapshotNote")}</p>
         </div>
         <div className="flex items-center gap-2">
           <Input className="h-8 w-48 text-sm" placeholder={t("common.search")} value={search} onChange={(event) => setSearch(event.target.value)} />
+          {grouping ? (
+            <>
+              <Button size="sm" onClick={() => setSavingGroup(true)} disabled={picked.size === 0}>
+                <Save className="h-3.5 w-3.5" />
+                {t("profiles.groups.saveButton", { count: picked.size })}
+              </Button>
+              <Button size="sm" variant="ghost" onClick={stopGrouping}>
+                {t("common.cancel")}
+              </Button>
+            </>
+          ) : (
+            <Button size="sm" variant="outline" onClick={() => setGrouping(true)}>
+              <Layers className="h-3.5 w-3.5" />
+              {t("profiles.groups.make")}
+            </Button>
+          )}
+          <Button size="sm" variant="outline" onClick={() => setManagingGroups(true)}>
+            <Tags className="h-3.5 w-3.5" />
+            {t("profiles.groups.manage")}
+          </Button>
           <Button size="sm" onClick={() => setCreating(true)}>
             <Plus className="h-3.5 w-3.5" />
             {t("profiles.create")}
@@ -57,7 +103,17 @@ export function ProfilesPage() {
           <Table>
             <thead>
               <tr>
+                {grouping ? (
+                  <th className="w-8">
+                    <Checkbox
+                      aria-label={t("common.selectAll")}
+                      checked={rows.length > 0 && rows.every((profile) => picked.has(profile.id))}
+                      onChange={(event) => setPicked(event.target.checked ? new Set(rows.map((profile) => profile.id)) : new Set())}
+                    />
+                  </th>
+                ) : null}
                 <th>{t("common.name")}</th>
+                <th>{t("profiles.groups.column")}</th>
                 <th>{t("profiles.url")}</th>
                 <th>{t("common.status")}</th>
                 <th>{t("profiles.theme")}</th>
@@ -69,8 +125,22 @@ export function ProfilesPage() {
             </thead>
             <tbody>
               {rows.map((profile) => (
-                <tr key={profile.id} className="cursor-pointer hover:bg-accent/40" onClick={() => setOpenId(profile.id)}>
+                <tr
+                  key={profile.id}
+                  className="cursor-pointer hover:bg-accent/40"
+                  onClick={() => (grouping ? togglePicked(profile.id) : setOpenId(profile.id))}
+                >
+                  {grouping ? (
+                    <td onClick={(event) => event.stopPropagation()}>
+                      <Checkbox
+                        aria-label={profile.name}
+                        checked={picked.has(profile.id)}
+                        onChange={() => togglePicked(profile.id)}
+                      />
+                    </td>
+                  ) : null}
                   <td className="font-medium">{profile.name}</td>
+                  <td>{profile.group ? <GroupChip group={profile.group} /> : <span className="text-muted-foreground">—</span>}</td>
                   <td className="max-w-[14rem] truncate text-xs">{profile.url ?? "—"}</td>
                   <td>
                     <Badge tone={profile.status === "active" ? "success" : "neutral"}>
@@ -88,6 +158,26 @@ export function ProfilesPage() {
           </Table>
         )}
       </Card>
+
+      <SaveGroupDialog
+        open={savingGroup}
+        profileIds={[...picked]}
+        groups={groups.data?.items ?? []}
+        onClose={() => setSavingGroup(false)}
+        onSaved={(group) => {
+          push({ tone: "success", title: t("profiles.groups.saved", { name: group.name }) });
+          setSavingGroup(false);
+          stopGrouping();
+          refreshGroups();
+        }}
+      />
+      <ManageGroupsDialog
+        open={managingGroups}
+        groups={groups.data?.items ?? []}
+        profiles={rows}
+        onClose={() => setManagingGroups(false)}
+        onChanged={refreshGroups}
+      />
 
       <ProfileDialog
         open={creating || Boolean(openId)}
@@ -589,7 +679,7 @@ function PromptTab({
                         key={index}
                         className={
                           entry.op === "add"
-                            ? "text-emerald-600 dark:text-emerald-400"
+                            ? "text-success"
                             : entry.op === "remove"
                               ? "text-destructive"
                               : entry.op === "hunk"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -15,6 +16,10 @@ os.environ.setdefault("MASTER_KEY", "dGVzdC1tYXN0ZXIta2V5LTMyLWJ5dGVzLWxvbmch")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("REDIS_URL", "")
 os.environ.setdefault("COOKIE_SECURE", "false")
+# Production containers run on the platform's business timezone (TZ=America/New_York),
+# so ``date.today()`` in tests means the same day the app computes.
+os.environ["TZ"] = "America/New_York"
+time.tzset()
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402

@@ -7,9 +7,9 @@ export function ConnectionIndicator({ compact = false }: { compact?: boolean }) 
   const { state } = useRealtime();
   const tone =
     state === "live"
-      ? "text-emerald-600 dark:text-emerald-400"
+      ? "text-success"
       : state === "reconnecting"
-        ? "text-amber-600 dark:text-amber-400"
+        ? "text-warning"
         : "text-destructive";
   const label =
     state === "live" ? t("connection.live") : state === "reconnecting" ? t("connection.reconnecting") : t("connection.offline");

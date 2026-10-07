@@ -38,16 +38,16 @@ export function FileChips({
         return (
           <span
             key={file.id}
-            className="inline-flex items-center overflow-hidden rounded border border-border text-[11px]"
+            className="inline-flex items-center overflow-hidden rounded-full border border-border bg-surface text-[11px]"
             title={`${file.filename} · ${formatBytes(file.size_bytes)}`}
           >
-            <span className="bg-muted px-1.5 py-0.5 font-medium">{file.kind.toUpperCase()}</span>
+            <span className="bg-muted py-0.5 pl-2 pr-1.5 font-medium">{file.kind.toUpperCase()}</span>
             {canPreview ? (
               <button
                 type="button"
                 disabled={disabled}
                 onClick={() => openPreview(fileDownloadUrl(file.id, true))}
-                className="px-1 py-0.5 hover:bg-accent disabled:opacity-40"
+                className="px-[3px] py-0.5 hover:bg-accent disabled:opacity-40"
                 aria-label={`${t("common.preview")} ${file.kind}`}
               >
                 <Eye className="h-3 w-3" />
@@ -57,7 +57,7 @@ export function FileChips({
               type="button"
               disabled={disabled}
               onClick={() => downloadUrl(url)}
-              className="px-1 py-0.5 hover:bg-accent disabled:opacity-40"
+              className="px-[3px] py-0.5 hover:bg-accent disabled:opacity-40"
               aria-label={`${t("common.download")} ${file.kind}`}
             >
               <Download className="h-3 w-3" />

@@ -206,7 +206,7 @@ export function JdUploadPage() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-2">
         <div>
-          <h1 className="text-lg font-semibold">{t("jd.title")}</h1>
+          <h1 className="rf-page-title">{t("jd.title")}</h1>
           <p className="text-sm text-muted-foreground">{t("jd.subtitle")}</p>
         </div>
         <div className="text-right text-sm">
@@ -244,7 +244,7 @@ export function JdUploadPage() {
             }
           }}
           placeholder={t("jd.placeholder")}
-          className="rf-input min-h-[220px] resize-none font-mono text-[13px] leading-relaxed"
+          className="rf-input min-h-[220px] resize-none text-sm leading-relaxed"
           aria-label={t("jd.placeholder")}
         />
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2">

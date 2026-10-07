@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Download, Eye, ListTree, Pencil, Play, RefreshCw, SkipForward, Sparkles, Star, Trash2 } from "lucide-react";
+import { Download, ExternalLink, Eye, ListTree, Pencil, Play, RefreshCw, SkipForward, Sparkles, Star, Trash2 } from "lucide-react";
 import { api, downloadBlob, errorMessage } from "../../lib/api";
 import { formatDateTime, formatTime, formatSeq } from "../../lib/format";
 import { Badge, Button, Checkbox, Input } from "../../ui/primitives";
@@ -46,7 +46,7 @@ export function ResumesTable({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const isManager = role === "manager";
-  const columns = isManager ? 9 : 7;
+  const columns = isManager ? 10 : 8;
 
   const toggle = (id: string) => {
     onSelectionChange(selection.includes(id) ? selection.filter((value) => value !== id) : [...selection, id]);
@@ -123,6 +123,7 @@ export function ResumesTable({
               {sortArrow("ready")}
             </th>
             <th>{t("resumes.columns.files")}</th>
+            <th>{t("resumes.columns.jobLink")}</th>
             <th className="w-10" />
           </tr>
         </thead>
@@ -151,8 +152,8 @@ export function ResumesTable({
                       </td>
                     ) : null}
                     <td className="font-mono text-xs">{formatSeq(row.seq_no)}</td>
-                    <td className="max-w-[14rem] truncate">
-                      <button type="button" className="text-left hover:underline" onClick={() => onOpen(row)}>
+                    <td className="max-w-[10rem] truncate" title={row.doc_set?.company_name ?? undefined}>
+                      <button type="button" className="max-w-full truncate text-left align-middle hover:underline" onClick={() => onOpen(row)}>
                         {row.doc_set?.company_name ?? t("common.unknown")}
                       </button>
                       {row.duplicate_of ? (
@@ -166,7 +167,7 @@ export function ResumesTable({
                         </Badge>
                       ) : null}
                     </td>
-                    <td className="max-w-[16rem] truncate">{row.doc_set?.job_title ?? "—"}</td>
+                    <td className="max-w-[10rem] truncate" title={row.doc_set?.job_title ?? undefined}>{row.doc_set?.job_title ?? "—"}</td>
                     {isManager ? <td className="max-w-[10rem] truncate">{row.maker_name ?? "—"}</td> : null}
                     <td>
                       <StatusChip status={row.status} role={role} />
@@ -191,7 +192,10 @@ export function ResumesTable({
                     </td>
                     <td className="whitespace-nowrap text-xs text-muted-foreground">{formatTime(row.released_at)}</td>
                     <td>
-                      <FileChips files={row.files} expiredAt={row.expired ? row.doc_set?.files_expired_at : null} disabled={!ready} />
+                      <FileChips className="flex-nowrap" files={row.files} expiredAt={row.expired ? row.doc_set?.files_expired_at : null} disabled={!ready} />
+                    </td>
+                    <td>
+                      <JobLinkButton link={row.job_link} ready={ready} />
                     </td>
                     <td>
                       <DropdownMenu>
@@ -415,5 +419,30 @@ function RenameDialog({
       <label className="rf-label mt-3">{t("resumes.renameTitle")}</label>
       <Input value={title} onChange={(event) => setTitle(event.target.value)} />
     </Dialog>
+  );
+}
+
+/**
+ * BULK-1: opens the posting the resume was made for. Only Bulk Resumes rows have
+ * a link (a pasted JD has none), and it opens once the resume is ready.
+ */
+function JobLinkButton({ link, ready }: { link?: string | null; ready: boolean }) {
+  const safe = link && /^https?:\/\//i.test(link) ? link : null;
+  const enabled = Boolean(safe) && ready;
+  const hint = !safe ? t("resumes.jobLink.none") : !ready ? t("resumes.jobLink.notReady") : safe;
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      className="gap-1 whitespace-nowrap px-2.5"
+      disabled={!enabled}
+      title={hint}
+      onClick={() => {
+        if (safe) window.open(safe, "_blank", "noopener,noreferrer");
+      }}
+    >
+      <ExternalLink className="h-3.5 w-3.5" />
+      {t("resumes.jobLink.open")}
+    </Button>
   );
 }

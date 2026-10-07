@@ -58,9 +58,11 @@ async def row_for(
         if user.role == "maker":
             files = [f for f in files if f.kind in {"pdf", "docx", "txt"}]
     row = job_out(job, derived=derived, doc_set=doc_set, duplicate_seq=duplicate_seq)
+    maker = await session.get(User, job.maker_id) if user.role == "manager" else None
     row.update(
         {
             "doc_set_id": doc_set.id,
+            "maker_name": maker.name if maker is not None else None,
             "generation_count": len(generations),
             "files": [file_out(f) for f in files],
             "is_selected": doc_set.is_selected,

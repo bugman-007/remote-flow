@@ -7,6 +7,7 @@ import { AuthProvider } from "./auth/AuthProvider";
 import { RealtimeProvider } from "./realtime/RealtimeProvider";
 import { ThemeProvider } from "./theme/ThemeProvider";
 import { ToastProvider } from "./ui/toast";
+import "@fontsource-variable/manrope";
 import "./index.css";
 
 const queryClient = new QueryClient({

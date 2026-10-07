@@ -156,7 +156,7 @@ export function InterviewsPage() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-lg font-semibold">{t("interviews.title")}</h1>
+          <h1 className="rf-page-title">{t("interviews.title")}</h1>
           {!isManager && interviews.data?.unseen ? (
             <p className="text-sm text-muted-foreground">{t("interviews.newBadge", { count: interviews.data.unseen })}</p>
           ) : null}

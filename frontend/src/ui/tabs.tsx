@@ -18,7 +18,10 @@ export function Tabs({
   className?: string;
 }) {
   return (
-    <div className={cn("flex flex-wrap items-center gap-1 border-b border-border", className)} role="tablist">
+    <div
+      className={cn("inline-flex max-w-full flex-wrap items-center gap-1 rounded-lg border border-border bg-surface p-1", className)}
+      role="tablist"
+    >
       {items.map((item) => (
         <button
           key={item.id}
@@ -26,15 +29,15 @@ export function Tabs({
           aria-selected={value === item.id}
           onClick={() => onChange(item.id)}
           className={cn(
-            "-mb-px inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium transition",
+            "inline-flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-sm font-medium transition",
             value === item.id
-              ? "border-primary text-foreground"
-              : "border-transparent text-muted-foreground hover:text-foreground",
+              ? "bg-accent text-foreground shadow-card"
+              : "text-muted-foreground hover:text-foreground",
           )}
         >
           {item.label}
           {item.badge !== undefined && item.badge !== 0 ? (
-            <span className="rounded-full bg-muted px-1.5 text-xs text-muted-foreground">{item.badge}</span>
+            <span className="rounded-full bg-primary/15 px-1.5 text-xs font-semibold text-primary">{item.badge}</span>
           ) : null}
         </button>
       ))}

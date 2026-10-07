@@ -95,6 +95,10 @@ export interface DocSetRow {
   released_late: boolean;
   skipped_at: string | null;
   duplicate_of: string | null;
+  /** BULK-1: ``bulk`` rows came from a Bulk Resumes CSV and carry its job link. */
+  source?: "manual" | "bulk";
+  job_link?: string | null;
+  skip_reason?: "duplicate" | "failed" | null;
   status: DerivedStatus;
   doc_set: DocSetSummary | null;
   generation_count: number;
@@ -121,6 +125,9 @@ export interface JobRow {
   skipped_at: string | null;
   duplicate_of: string | null;
   duplicate_seq?: number | null;
+  source?: "manual" | "bulk";
+  job_link?: string | null;
+  skip_reason?: "duplicate" | "failed" | null;
   status: DerivedStatus;
   doc_set: DocSetSummary | null;
 }
@@ -190,9 +197,51 @@ export interface PromptVersion {
   diff?: { op: "add" | "remove" | "context" | "hunk"; line: string }[] | null;
 }
 
+export interface GroupRef {
+  id: string;
+  name: string;
+  color: string;
+}
+
+/** PRO-11: a named, coloured set of Profiles (one group per Profile). */
+export interface ProfileGroup extends GroupRef {
+  profile_ids: string[];
+  profile_count: number;
+  created_at: string;
+}
+
+export interface BulkBatch {
+  id: string;
+  filename: string | null;
+  created_at: string;
+  generated_at: string | null;
+  usable_rows: number;
+  rejected_rows: number;
+  rejected: { row: number; reason: string }[];
+  summary: BulkSummary | null;
+}
+
+export interface BulkSummary {
+  count: number;
+  created: number;
+  profiles: {
+    profile_id: string;
+    profile_name: string;
+    maker_id: string;
+    maker_name: string;
+    created: number;
+    skipped_duplicates: number;
+    short_by: number;
+  }[];
+  skipped_profiles: { profile_id: string; profile_name: string; reason: string }[];
+  csv_duplicates: number;
+  rejected_rows: number;
+}
+
 export interface Profile {
   id: string;
   name: string;
+  group?: GroupRef | null;
   url: string | null;
   description: string | null;
   start_date: string | null;

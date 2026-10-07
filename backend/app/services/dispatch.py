@@ -140,3 +140,10 @@ def dispatch_state_payload(generation: Any) -> dict:
         "status": generation.status,
         "stage": generation.stage,
     }
+
+
+def drop_dispatch(session: AsyncSession, generation_id: str) -> None:
+    """Forget a queued-after-commit dispatch (the build was cancelled before commit)."""
+    pending = session.info.get(DISPATCH_KEY)
+    if pending:
+        session.info[DISPATCH_KEY] = [entry for entry in pending if entry[0] != generation_id]

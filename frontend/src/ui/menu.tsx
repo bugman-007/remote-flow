@@ -15,10 +15,13 @@ export function DropdownMenu({
   children,
   label,
   align = "right",
+  triggerClassName,
 }: {
   children: ReactNode | ((close: () => void) => ReactNode);
   label?: ReactNode;
   align?: "left" | "right";
+  /** Styles a custom ``label`` trigger (it is sized to its content). */
+  triggerClassName?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
@@ -75,7 +78,8 @@ export function DropdownMenu({
       <Button
         ref={triggerRef}
         variant="ghost"
-        size="icon"
+        size={label ? "md" : "icon"}
+        className={triggerClassName}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
@@ -89,7 +93,7 @@ export function DropdownMenu({
               role="menu"
               style={{ position: "fixed", top: position?.top ?? -9999, left: position?.left ?? -9999 }}
               className={cn(
-                "z-50 min-w-[13rem] overflow-hidden rounded-md border border-border bg-card py-1 shadow-lg",
+                "z-50 min-w-[13rem] overflow-hidden rounded-lg border border-border bg-card p-1 shadow-2xl",
                 !position && "invisible",
               )}
             >
@@ -120,7 +124,7 @@ export function MenuItem({
       disabled={disabled}
       onClick={onSelect}
       className={cn(
-        "block w-full px-3 py-1.5 text-left text-sm transition hover:bg-accent disabled:opacity-50",
+        "block w-full rounded-md px-3 py-2 text-left text-sm transition hover:bg-accent disabled:opacity-50",
         destructive && "text-destructive",
       )}
     >

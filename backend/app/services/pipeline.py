@@ -326,12 +326,16 @@ async def record_failure(
         generation.next_retry_at = None
         new_status = "needs_attention"
         await emit_build_event(session, generation, "build.needs_attention", {
-            "blocking": generation.kind != "regenerate",
+            # A failed first build no longer holds the Maker's later deliveries:
+            # its job is skipped automatically right below.
+            "blocking": False,
             "kind": generation.kind,
             "stage": stage,
             "attempt": used,
             "error_code": error_code,
         })
+        if generation.kind == "initial":
+            await auto_skip(session, generation.job_id, reason="failed", generation_id=generation.id)
     else:
         delay = backoff_seconds(stage, used, retry_after_s=retry_after_s)
         generation.status = "retry_wait"
@@ -342,6 +346,40 @@ async def record_failure(
 
     await emit_job_status(session, generation, extra={"status": new_status, "attempt": used, "stage": stage})
     return new_status
+
+
+async def auto_skip(session: AsyncSession, job_id: str, *, reason: str, generation_id: str | None = None) -> bool:
+    """Skip a job the system cannot deliver (ORD-5 without a Manager).
+
+    The job leaves the Maker's delivery order so everything ready behind it is
+    released. Its build keeps its error and stays visible under Needs attention;
+    a Manager's Retry now still delivers it late (ORD-9).
+    """
+    job = await session.get(Job, job_id)
+    if job is None or job.delivery_status != "pending":
+        return False
+    job.delivery_status = "skipped"
+    job.skipped_at = now()
+    job.skipped_by = None
+    job.skip_reason = reason
+    await events.emit(
+        session,
+        audience=events.job_audience(job.maker_id),
+        event_type="job.status",
+        payload={"job_id": job.id, "seq_no": job.seq_no, "status": "skipped", "skip_reason": reason},
+        job_id=job.id,
+        generation_id=generation_id,
+        pipeline_event={
+            "from_state": "pending",
+            "to_state": "skipped",
+            "stage": "release",
+            "actor": "system",
+            "details": {"reason": reason},
+        },
+    )
+    await session.flush()
+    await release.release_pass(session, job.maker_id, actor="auto-skip")
+    return True
 
 
 async def maybe_switch_to_fallback(session: AsyncSession, generation: Generation, *, actor: str) -> bool:
@@ -615,6 +653,9 @@ async def execute_llm_attempt(
                 repair_rounds=0 if single_request else REPAIR_ROUNDS,
             )
             canonical = inject_job_description(canonical, job.jd_text if job else "")
+            if job and job.job_link:
+                # BULK-1: the posting URL from the CSV is the job link (resume JSON + JD.txt).
+                canonical["job_link"] = job.job_link
         except LLMError as exc:
             await write_llm_artifacts(
                 session,
@@ -970,6 +1011,10 @@ async def retry_now(session: AsyncSession, *, job: Job, mode: str, actor_id: str
         profile = await session.get(Profile, job.profile_id) if job.profile_id else None
         if profile is None:
             raise ValueError("job has no profile")
+        failed = await release.initial_generation(session, job)
+        if failed is not None and failed.status == "needs_attention":
+            # The automatic skip kept the failed build visible; the retry replaces it.
+            failed.status = "cancelled"
         return await snapshots.create_generation(
             session, job=job, profile=profile, kind="retry_after_skip", created_by=actor_id
         )

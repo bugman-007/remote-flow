@@ -33,19 +33,19 @@ export function Dialog({
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 sm:items-center">
-      <div className={cn("w-full rounded-lg border border-border bg-card shadow-xl", width)} role="dialog" aria-modal="true">
-        <div className="flex items-start justify-between gap-4 border-b border-border px-4 py-3">
-          <div>
-            <h2 className="text-sm font-semibold">{title}</h2>
-            {description ? <p className="mt-0.5 text-xs text-muted-foreground">{description}</p> : null}
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm sm:items-center">
+      <div className={cn("rf-card w-full shadow-2xl", width)} role="dialog" aria-modal="true">
+        <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+          <div className="min-w-0">
+            <h2 className="text-base font-medium">{title}</h2>
+            {description ? <p className="mt-1 truncate text-xs text-muted-foreground">{description}</p> : null}
           </div>
           <Button variant="ghost" size="icon" onClick={onClose} aria-label={t("common.close")}>
             <X className="h-4 w-4" />
           </Button>
         </div>
-        <div className="max-h-[70vh] overflow-y-auto px-4 py-3">{children}</div>
-        {footer ? <div className="flex justify-end gap-2 border-t border-border px-4 py-3">{footer}</div> : null}
+        <div className="max-h-[70vh] overflow-y-auto px-5 py-4">{children}</div>
+        {footer ? <div className="flex justify-end gap-2 border-t border-border px-5 py-4">{footer}</div> : null}
       </div>
     </div>
   );
@@ -75,18 +75,18 @@ export function Drawer({
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/40" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm" onClick={onClose}>
       <aside
-        className={cn("flex h-full w-full flex-col border-l border-border bg-card shadow-xl", width)}
+        className={cn("flex h-full w-full flex-col border-l border-border bg-card shadow-2xl", width)}
         onClick={(event) => event.stopPropagation()}
       >
-        <header className="flex items-center justify-between gap-4 border-b border-border px-4 py-3">
-          <h2 className="text-sm font-semibold">{title}</h2>
+        <header className="flex items-center justify-between gap-4 border-b border-border px-5 py-4">
+          <h2 className="text-base font-medium">{title}</h2>
           <Button variant="ghost" size="icon" onClick={onClose} aria-label={t("common.close")}>
             <X className="h-4 w-4" />
           </Button>
         </header>
-        <div className="flex-1 overflow-y-auto p-4">{children}</div>
+        <div className="flex-1 overflow-y-auto p-5">{children}</div>
       </aside>
     </div>
   );

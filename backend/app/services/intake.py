@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import acquire_serialization_lock, is_postgres
 from app.models import DocSet, FileArtifact, Job, Profile, ProfileAssignment, User
 from app.services import events, settings_store, snapshots, storage
+from app.services.dispatch import drop_dispatch
 from app.services.snapshots import SnapshotError
 from app.utils import sha256_text, utcnow
 from app.services.search import attach_jd_tsv
@@ -44,9 +45,12 @@ async def active_assignment(session: AsyncSession, maker_id: str) -> ProfileAssi
 
 
 async def usage_today(session: AsyncSession, maker_id: str, day: date) -> int:
+    """JDs the Maker submitted today. Bulk Resumes jobs never count against the limit."""
     count = (
         await session.execute(
-            select(func.count(Job.id)).where(Job.maker_id == maker_id, Job.submitted_date == day)
+            select(func.count(Job.id)).where(
+                Job.maker_id == maker_id, Job.submitted_date == day, Job.source == "manual"
+            )
         )
     ).scalar_one()
     return int(count or 0)
@@ -62,8 +66,16 @@ async def submit_jd(
     maker: User,
     jd_text: str,
     idempotency_key: str | None,
+    source: str = "manual",
+    job_link: str | None = None,
+    bulk_batch_id: str | None = None,
 ) -> tuple[Job, bool]:
-    """Returns ``(job, created)``. Raises :class:`IntakeError` on rejection."""
+    """Returns ``(job, created)``. Raises :class:`IntakeError` on rejection.
+
+    ``source="bulk"`` (Bulk Resumes) skips the Maker's daily limit and records the
+    posting's ``job_link``. A JD the Maker already has in the duplicate window is
+    accepted but skipped at once - it never reaches the LLM.
+    """
     text = normalise_jd(jd_text)
     settings = await settings_store.all_settings(session)
     if len(text) < int(settings["min_jd_chars"]):
@@ -99,7 +111,7 @@ async def submit_jd(
         raise IntakeError("no_profile_assigned", "Your account is not yet configured. Contact your manager.", status_code=409)
 
     day = await server_today(session)
-    if maker.daily_limit is not None:
+    if source == "manual" and maker.daily_limit is not None:
         used = await usage_today(session, maker.id, day)
         if used >= maker.daily_limit:
             raise IntakeError("limit_reached", "You have reached your daily submission limit.", status_code=429)
@@ -117,7 +129,13 @@ async def submit_jd(
     duplicate = (
         await session.execute(
             select(Job.id)
-            .where(Job.maker_id == maker.id, Job.jd_hash == jd_hash, Job.submitted_at >= cutoff)
+            .where(
+                Job.maker_id == maker.id,
+                Job.jd_hash == jd_hash,
+                Job.submitted_at >= cutoff,
+                # A cancelled/skipped job is not a copy to protect: resubmitting it is fine.
+                Job.delivery_status != "skipped",
+            )
             .order_by(Job.submitted_at.desc())
             .limit(1)
         )
@@ -134,6 +152,9 @@ async def submit_jd(
         jd_hash=jd_hash,
         duplicate_of=duplicate,
         delivery_status="pending",
+        source=source,
+        job_link=job_link,
+        bulk_batch_id=bulk_batch_id,
     )
     session.add(job)
     await session.flush()
@@ -148,6 +169,14 @@ async def submit_jd(
         )
     except SnapshotError as exc:
         raise IntakeError(getattr(exc, "code", "no_provider_configured"), str(exc), status_code=409) from exc
+    if duplicate:
+        # Skipped automatically: the build is cancelled before any LLM call and the
+        # job leaves the Maker's delivery order, so it never holds anything back.
+        generation.status = "cancelled"
+        job.delivery_status = "skipped"
+        job.skipped_at = utcnow()
+        job.skip_reason = "duplicate"
+        drop_dispatch(session, generation.id)
 
     directory = storage.doc_set_dir(maker.id, day, seq_no, "pending")
     storage.ensure_dir(directory)
@@ -177,7 +206,8 @@ async def submit_jd(
         payload={
             "job_id": job.id,
             "seq_no": seq_no,
-            "status": "queued",
+            "status": "skipped" if duplicate else "queued",
+            "skip_reason": job.skip_reason,
             "generation_id": generation.id,
             "duplicate_of": duplicate,
         },
@@ -188,7 +218,7 @@ async def submit_jd(
             "to_state": "pending",
             "stage": "intake",
             "actor": maker.id,
-            "details": {"seq_no": seq_no, "duplicate_of": duplicate},
+            "details": {"seq_no": seq_no, "duplicate_of": duplicate, "source": source},
         },
     )
     await session.flush()
