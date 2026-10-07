@@ -2,6 +2,28 @@
 
 import { apiBase, triggerDownload } from "./api";
 
+/**
+ * The platform's business timezone (Settings -> General). Every time in the UI
+ * is shown in it, whatever zone the viewer's browser is in; the server sends it
+ * with the signed-in user (/auth/me, /auth/login).
+ */
+export const DEFAULT_TIME_ZONE = "America/New_York";
+let platformZone = DEFAULT_TIME_ZONE;
+
+export function setPlatformTimeZone(zone?: string | null): void {
+  if (!zone) return;
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone: zone });
+    platformZone = zone;
+  } catch {
+    /* unknown to this browser: keep the previous zone */
+  }
+}
+
+export function platformTimeZone(): string {
+  return platformZone;
+}
+
 export function formatDateTime(value?: string | null): string {
   if (!value) return "—";
   const date = new Date(value);
@@ -12,14 +34,15 @@ export function formatDateTime(value?: string | null): string {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: platformZone,
   });
 }
 
-export function formatTime(value?: string | null): string {
-  if (!value) return "—";
+export function formatTime(value?: string | number | null): string {
+  if (value === null || value === undefined || value === "") return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", timeZone: platformZone });
 }
 
 export function formatDate(value?: string | null): string {
@@ -81,10 +104,14 @@ export function formatMs(ms?: number | null): string {
   return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`;
 }
 
+/** Today's date (YYYY-MM-DD) in the platform's timezone, not the browser's. */
 export function todayISO(): string {
-  const now = new Date();
-  const offset = now.getTimezoneOffset();
-  return new Date(now.getTime() - offset * 60 * 1000).toISOString().slice(0, 10);
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: platformZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
 }
 
 export function shiftDate(iso: string, days: number): string {

@@ -66,6 +66,55 @@ Targets:
 
 ---
 
+## render — 2026-09-24T18:23:54Z (target server, real LibreOffice)
+
+```json
+{
+  "n": 20,
+  "failures": 0,
+  "p50_ms": 679.8,
+  "p95_ms": 777.9,
+  "peak_rss_mb": 89.9,
+  "pdf_backend": "unoserver",
+  "environment": {
+    "python": "3.12.14",
+    "storage_dir": "/storage"
+  },
+  "recorded_at": "2026-09-24T18:23:54.260270Z"
+}
+```
+
+Recorded inside the deployed `worker-render` container (LibreOffice present, so
+`pdf_backend` is the real DOCX + `soffice --convert-to pdf` path; the field name
+is the benchmark's own label, the conversion itself ran through `soffice`). The
+per-conversion cost is one busy core for ~0.7 s; `docker stats` showed the whole
+container at ~500 MB during a conversion and ~285 MB when idle, i.e. **~215 MB
+per concurrent conversion**. `peak_rss_mb` above only counts the parent Python
+process, which is why it reads 90 MB.
+
+That measurement is what sets `RENDER_CONCURRENCY` to **2** in `deploy/.env`:
+two conversions already saturate both cores of the target box, and the LLM stage
+(0.5-15 min per call) is the real bottleneck. Raise the knob only with free cores.
+
+## render — 2026-09-24T18:33:45Z (two conversions at once)
+
+Two `bench-render --n 8` runs in parallel inside the deployed `worker-render`
+container, i.e. exactly what `RENDER_CONCURRENCY=2` does to a burst:
+
+```json
+[
+  {"n": 8, "failures": 0, "p50_ms": 793.5, "p95_ms": 928.1},
+  {"n": 8, "failures": 0, "p50_ms": 763.8, "p95_ms": 977.3}
+]
+```
+
+`docker stats` peaked at **173 % CPU** (both cores) and **430 MB** for the whole
+container, 0 failures. Two concurrent conversions therefore give roughly 1.8x the
+throughput of one for a ~15 % latency penalty per document, and each conversion
+uses its own private LibreOffice profile so they never share state.
+
+---
+
 ## Environment notes
 
 The numbers above were recorded on the development box that hosts this

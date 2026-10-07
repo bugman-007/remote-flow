@@ -5,7 +5,6 @@ from __future__ import annotations
 import csv
 import io
 from datetime import datetime, time
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import func, or_, select
@@ -45,12 +44,7 @@ async def _active_manager_count(session: AsyncSession, *, excluding: str | None 
 
 async def _day_start(session: AsyncSession, day) -> datetime:
     """Midnight of ``day`` in the configured server timezone (used for "today" counts)."""
-    tz_name = await settings_store.get_setting(session, "timezone") or "UTC"
-    try:
-        tz = ZoneInfo(tz_name)
-    except Exception:  # noqa: BLE001
-        tz = ZoneInfo("UTC")
-    return datetime.combine(day, time.min, tzinfo=tz)
+    return datetime.combine(day, time.min, tzinfo=await settings_store.platform_timezone(session))
 
 
 async def _bulk_stats(session: AsyncSession, users: list[User], day) -> dict[str, dict]:

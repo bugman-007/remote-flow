@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +11,10 @@ from app.models import DailyMakerStat, DocSet, Generation, GenerationAttempt, Jo
 
 
 async def refresh_daily_stats(session: AsyncSession, *, days: int = 3, today: date | None = None) -> int:
-    today = today or datetime.utcnow().date()
+    if today is None:
+        from app.services.settings_store import platform_today
+
+        today = await platform_today(session)
     refreshed = 0
     for offset in range(days):
         day = today - timedelta(days=offset)

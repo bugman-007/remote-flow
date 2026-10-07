@@ -3,60 +3,113 @@
 @tailwind utilities;
 
 @layer base {
+  /*
+   * Design language: deep charcoal surfaces, hairline borders, a soft lavender
+   * accent and generous rounded corners. Dark is the default; light keeps the
+   * same accent and shapes.
+   */
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222 47% 11%;
+    --background: 250 25% 97%;
+    --foreground: 245 20% 12%;
+    --surface: 0 0% 100%;
     --card: 0 0% 100%;
-    --card-foreground: 222 47% 11%;
-    --muted: 210 40% 96%;
-    --muted-foreground: 215 16% 47%;
-    --border: 214 32% 91%;
-    --input: 214 32% 91%;
-    --ring: 215 20% 65%;
-    --primary: 210 100% 26%;
+    --card-foreground: 245 20% 12%;
+    --card-highlight: 252 60% 99%;
+    --muted: 248 22% 94%;
+    --muted-foreground: 245 8% 46%;
+    --border: 248 18% 89%;
+    --input: 248 18% 87%;
+    --ring: 254 70% 62%;
+    --primary: 254 62% 58%;
     --primary-foreground: 0 0% 100%;
-    --accent: 210 40% 94%;
-    --accent-foreground: 222 47% 11%;
-    --destructive: 0 72% 45%;
+    --accent: 250 30% 95%;
+    --accent-foreground: 245 20% 12%;
+    --destructive: 0 72% 52%;
     --destructive-foreground: 0 0% 100%;
+    --success: 152 60% 36%;
+    --warning: 36 92% 44%;
   }
 
   .dark {
-    --background: 222 47% 8%;
-    --foreground: 210 40% 96%;
-    --card: 222 42% 11%;
-    --card-foreground: 210 40% 96%;
-    --muted: 217 33% 17%;
-    --muted-foreground: 215 20% 65%;
-    --border: 217 33% 20%;
-    --input: 217 33% 22%;
-    --ring: 215 20% 45%;
-    --primary: 205 90% 60%;
-    --primary-foreground: 222 47% 8%;
-    --accent: 217 33% 20%;
-    --accent-foreground: 210 40% 96%;
-    --destructive: 0 62% 50%;
-    --destructive-foreground: 0 0% 100%;
+    --background: 240 14% 5%;
+    --foreground: 240 10% 96%;
+    --surface: 240 12% 7%;
+    --card: 240 11% 8.5%;
+    --card-foreground: 240 10% 96%;
+    --card-highlight: 245 14% 12%;
+    --muted: 240 9% 13%;
+    --muted-foreground: 240 6% 62%;
+    --border: 240 8% 16%;
+    --input: 240 8% 19%;
+    --ring: 254 92% 80%;
+    --primary: 254 92% 81%;
+    --primary-foreground: 250 30% 9%;
+    --accent: 240 9% 14%;
+    --accent-foreground: 240 10% 96%;
+    --destructive: 0 86% 68%;
+    --destructive-foreground: 250 30% 9%;
+    --success: 142 69% 58%;
+    --warning: 38 92% 62%;
   }
 
   * {
     @apply border-border;
   }
 
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Native controls (checkboxes, date pickers, scrollbars) follow the theme. */
+  .dark {
+    color-scheme: dark;
+  }
+
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background font-sans text-foreground;
     font-feature-settings: "tnum" 0;
+    /* Manrope's space is narrow; at 1x on small labels words ran together. */
+    word-spacing: 0.06em;
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.35);
+  }
+
+  /* Quiet, thin scrollbars to match the surfaces. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
   }
 }
 
 @layer components {
+  /* Cards: a faint top highlight fading into the charcoal surface. */
+  .rf-card {
+    @apply rounded-xl border border-border shadow-card;
+    background: linear-gradient(180deg, hsl(var(--card-highlight)) 0%, hsl(var(--card)) 140px);
+  }
+
+  .rf-page-title {
+    @apply text-2xl font-normal tracking-tight tablet:text-[1.75rem];
+  }
+
   .rf-input {
-    @apply w-full rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm outline-none transition
-      placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60;
+    @apply w-full rounded-md border border-input bg-surface px-3 py-2 text-sm outline-none transition
+      placeholder:text-muted-foreground/70 hover:border-muted-foreground/40
+      focus-visible:border-primary/60 focus-visible:ring-4 focus-visible:ring-primary/15
+      disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  select.rf-input {
+    @apply appearance-none bg-no-repeat;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239b9ba5' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-position: right 0.75rem center;
   }
 
   .rf-label {
-    @apply mb-1 block text-xs font-medium uppercase tracking-wide text-muted-foreground;
+    @apply mb-1.5 block text-xs font-medium text-muted-foreground;
   }
 
   .rf-table {
@@ -64,15 +117,32 @@
   }
 
   .rf-table th {
-    @apply whitespace-nowrap border-b border-border px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground;
+    @apply whitespace-nowrap border-b border-border px-2.5 py-2.5 text-left text-xs font-medium text-muted-foreground;
   }
 
   .rf-table td {
-    @apply border-b border-border/70 px-3 py-2 align-middle;
+    @apply border-b border-border/60 px-2.5 py-2.5 align-middle;
+  }
+
+  .rf-table tbody tr:last-child td {
+    @apply border-b-0;
+  }
+
+  .rf-table tbody tr {
+    @apply transition-colors;
   }
 
   .rf-scroll {
     @apply overflow-x-auto;
+  }
+
+  /* The lavender glow panel (login, highlights). */
+  .rf-glow-panel {
+    @apply relative overflow-hidden rounded-xl border border-primary/25;
+    background:
+      radial-gradient(120% 80% at 100% 100%, hsl(var(--primary) / 0.38) 0%, transparent 55%),
+      radial-gradient(90% 60% at 0% 0%, hsl(var(--primary) / 0.10) 0%, transparent 60%),
+      linear-gradient(180deg, hsl(var(--card-highlight)) 0%, hsl(var(--card)) 100%);
   }
 
   /* UI-8: indeterminate top progress bar while API calls are in flight. */
@@ -104,7 +174,7 @@
     }
 
     .rf-table tr {
-      @apply mb-2 rounded-lg border border-border bg-card p-1;
+      @apply mb-2 rounded-lg border border-border bg-card p-1.5;
     }
 
     .rf-table td {

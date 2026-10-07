@@ -40,15 +40,17 @@ def is_postgres(engine: AsyncEngine) -> bool:
     return engine.dialect.name == "postgresql"
 
 
-def create_engine_for(database_url: str) -> AsyncEngine:
+def create_engine_for(
+    database_url: str, *, pool_size: int | None = None, max_overflow: int | None = None
+) -> AsyncEngine:
     kwargs: dict = {"future": True}
     if database_url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False}
         if ":memory:" in database_url:
             kwargs["poolclass"] = StaticPool
     else:
-        kwargs["pool_size"] = 10
-        kwargs["max_overflow"] = 20
+        kwargs["pool_size"] = 10 if pool_size is None else pool_size
+        kwargs["max_overflow"] = 20 if max_overflow is None else max_overflow
         kwargs["pool_pre_ping"] = True
     engine = create_async_engine(database_url, **kwargs)
     if engine.dialect.name == "sqlite":

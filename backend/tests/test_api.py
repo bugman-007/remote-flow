@@ -136,6 +136,78 @@ async def test_submit_run_pipeline_and_download_the_zip(api, workspace):
 
 
 @pytest.mark.asyncio
+async def test_manager_deletes_a_resume_permanently(api, workspace, db_session):
+    """Owner request: a Manager can remove a resume, its files and its history."""
+    from app.models import DocSet, FileArtifact, Generation, Job
+    from app.services import storage
+
+    maker = await api.login("maker@example.com", workspace["password"])
+    created = await submit_via_api(maker, key="api-purge-1")
+    await run_pipeline()
+
+    row = (await maker.get("/api/v1/doc-sets", params={"date": date.today().isoformat()})).json()["items"][0]
+    doc_set_id = row["doc_set_id"]
+    doc_set = (await db_session.execute(select(DocSet).where(DocSet.id == doc_set_id))).scalar_one()
+    folder = storage.storage_root() / doc_set.storage_dir
+    assert folder.exists()
+
+    # Only a Manager may do this, and only with an explicit confirmation.
+    assert (await maker.delete(f"/api/v1/doc-sets/{doc_set_id}", params={"confirm": True})).status_code == 403
+    manager = await api.login("manager@example.com", workspace["password"])
+    assert (await manager.delete(f"/api/v1/doc-sets/{doc_set_id}")).status_code == 409
+
+    deleted = await manager.delete(f"/api/v1/doc-sets/{doc_set_id}", params={"confirm": True})
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["bytes"] > 0
+
+    db_session.expire_all()
+    assert (await db_session.execute(select(DocSet).where(DocSet.id == doc_set_id))).scalar_one_or_none() is None
+    assert (await db_session.execute(select(Job).where(Job.id == created["job_id"]))).scalar_one_or_none() is None
+    assert (await db_session.execute(select(Generation).where(Generation.job_id == created["job_id"]))).scalars().all() == []
+    assert (await db_session.execute(select(FileArtifact).where(FileArtifact.doc_set_id == doc_set_id))).scalars().all() == []
+    assert not folder.exists(), "the documents must be gone from disk too"
+    assert (await manager.get("/api/v1/doc-sets", params={"date": date.today().isoformat()})).json()["items"] == []
+    assert (await manager.delete(f"/api/v1/doc-sets/{doc_set_id}", params={"confirm": True})).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_reports_a_resume_used_by_an_interview(api, workspace, db_session):
+    """Bulk delete removes what it can and names what it refused."""
+    from app.models import DocSet
+
+    maker = await api.login("maker@example.com", workspace["password"])
+    await submit_via_api(maker, text=JD, key="api-purge-2a")
+    await run_pipeline()
+    await submit_via_api(maker, text=JD + " A second, different role for the platform team.", key="api-purge-2b")
+    await run_pipeline()
+
+    rows = (await maker.get("/api/v1/doc-sets", params={"date": date.today().isoformat()})).json()["items"]
+    assert [item["seq_no"] for item in rows] == [1, 2]
+    pinned, removable = rows[0]["doc_set_id"], rows[1]["doc_set_id"]
+
+    manager = await api.login("manager@example.com", workspace["password"])
+    interview = await manager.post(
+        "/api/v1/interviews", json={"doc_set_id": pinned, "reviewer_id": str(workspace["reviewer"].id)}
+    )
+    assert interview.status_code == 201, interview.text
+
+    response = await manager.post("/api/v1/doc-sets/bulk-delete", json={"ids": [pinned, removable]})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["deleted"] == [removable]
+    assert body["blocked"] == [{"doc_set_id": pinned, "reason": "has_interviews", "interview_count": 1}]
+
+    refused = await manager.delete(f"/api/v1/doc-sets/{pinned}", params={"confirm": True})
+    assert refused.status_code == 409
+    assert refused.json()["error"]["code"] == "docset_has_interviews"
+    # The pinned doc set and its generations survived untouched.
+    db_session.expire_all()
+    kept = (await db_session.execute(select(DocSet).where(DocSet.id == pinned))).scalar_one_or_none()
+    assert kept is not None
+    assert (await db_session.execute(select(Generation).where(Generation.job_id == kept.job_id))).scalars().all()
+
+
+@pytest.mark.asyncio
 async def test_ordered_release_over_the_api_keeps_submission_order(api, workspace, fast_settings):
     """The queue releases 1..N in order even when build 2 is the slow one."""
     from app.services.llm import LLMError, LLMResult, set_client_override
@@ -165,24 +237,28 @@ async def test_ordered_release_over_the_api_keeps_submission_order(api, workspac
     finally:
         set_client_override(None)
 
-    listing = await maker.get("/api/v1/doc-sets", params={"date": date.today().isoformat()})
-    rows = {row["seq_no"]: row for row in listing.json()["items"]}
-    assert rows[1]["status"]["status"] == "released"
-    assert rows[2]["status"]["status"] == "needs_attention"
-    assert rows[3]["status"]["status"] == "waiting"
-    assert rows[3]["status"]["blocker_seq"] == 2
-
-    # Manager skips the blocker; everything ready behind it releases in order.
-    manager = await api.login("manager@example.com", workspace["password"])
-    job_id = rows[2]["id"]
-    skipped = await manager.post(f"/api/v1/jobs/{job_id}/skip")
-    assert skipped.status_code == 200, skipped.text
-
+    # Build 2 failed: it is skipped automatically, so 3 is not held back behind it.
     listing = await maker.get("/api/v1/doc-sets", params={"date": date.today().isoformat()})
     rows = {row["seq_no"]: row for row in listing.json()["items"]}
     assert rows[1]["status"]["status"] == "released"
     assert rows[2]["status"]["status"] == "skipped"
+    assert rows[2]["status"]["skip_reason"] == "failed"
+    assert rows[2]["status"]["label"] == "Skipped · failed"
     assert rows[3]["status"]["status"] == "released"
+
+    # The Manager can still retry the failed one; it is delivered late (ORD-9).
+    manager = await api.login("manager@example.com", workspace["password"])
+    set_client_override(Client())
+    try:
+        retried = await manager.post(f"/api/v1/jobs/{rows[2]['id']}/retry", json={"mode": "new_llm_call"})
+        assert retried.status_code == 200, retried.text
+        await run_pipeline()
+    finally:
+        set_client_override(None)
+    listing = await maker.get("/api/v1/doc-sets", params={"date": date.today().isoformat()})
+    rows = {row["seq_no"]: row for row in listing.json()["items"]}
+    assert [rows[n]["status"]["status"] for n in (1, 2, 3)] == ["released", "released", "released"]
+    assert rows[2]["status"]["released_late"] is True
 
 
 @pytest.mark.asyncio
@@ -1384,3 +1460,211 @@ async def test_submit_without_a_profile_prompt_fails_fast(api, workspace, fresh_
     assert saved.status_code == 201, saved.text
     accepted = await maker.post("/api/v1/jobs", json={"jd_text": JD})
     assert accepted.status_code == 201, accepted.text
+
+
+async def test_theme_schema_exposes_the_element_editor(api, workspace, fresh_client):
+    """Appendix C.2: the editor is data-driven from the schema endpoint."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    response = await manager.get("/api/v1/themes/schema")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    keys = {field["key"] for field in body["fields"]}
+    assert {"body_color", "muted_color", "bullet_glyph", "page_size"} <= keys
+    editor = body["editor"]
+    assert {element["key"] for element in editor["elements"]} == {
+        "name", "title", "contact", "section", "job", "meta", "bullet", "skills", "body",
+    }
+    assert editor["presets"], "the editor offers starter presets"
+    assert editor["page_sizes"] == ["Letter", "A4"]
+    assert any(field["key"] == "bg" for field in editor["elements"][0]["fields"])
+
+
+async def test_theme_sample_returns_the_generator_block_model(api, workspace, fresh_client):
+    """The browser preview renders the same blocks the DOCX writer receives."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    response = await manager.get("/api/v1/themes/sample")
+    assert response.status_code == 200, response.text
+    blocks = response.json()["blocks"]
+    kinds = [block["kind"] for block in blocks]
+    assert kinds[0] == "name" and "section" in kinds and "bullet" in kinds
+    assert blocks[0]["text"] == "Luis Angel Salazar"
+    assert any(block["align_right"] for block in blocks)
+
+
+async def test_manager_saves_per_element_and_per_phrase_styling(api, workspace, fresh_client):
+    """A theme round-trips the Appendix C.2 overrides through create -> read -> preview."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    params = {
+        "font": "Georgia",
+        "size": 11,
+        "body_color": "#111827",
+        "page_size": "A4",
+        "elements": {
+            "name": {"align": "center", "size": 24, "letter_spacing": 0.8, "weight": 700},
+            "meta": {"hidden": True},
+            "section": {"uppercase": True, "bg": "#F0FDFA", "rule_width": 12},
+        },
+        "text_rules": [{"text": "PostgreSQL", "bold": True, "color": "#B91C1C"}],
+    }
+    created = await manager.post(
+        "/api/v1/themes", json={"name": "Rich theme", "description": "v2", "params": params}
+    )
+    assert created.status_code == 201, created.text
+    theme_id = created.json()["id"]
+    saved = created.json()["params"]
+    assert saved["elements"]["name"]["align"] == "center"
+    assert saved["elements"]["meta"]["hidden"] is True
+    assert saved["text_rules"] == [{"text": "PostgreSQL", "bold": True, "color": "#B91C1C"}]
+
+    listing = await manager.get("/api/v1/themes")
+    stored = next(row for row in listing.json()["items"] if row["id"] == theme_id)
+    assert stored["params"]["elements"]["section"]["rule_width"] == 12
+
+    preview = await manager.post(f"/api/v1/themes/{theme_id}/preview")
+    assert preview.status_code == 200, preview.text
+    assert preview.content.startswith(b"%PDF")
+
+
+async def test_theme_validation_rejects_bad_element_overrides(api, workspace, fresh_client):
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    bad_align = await manager.post(
+        "/api/v1/themes", json={"name": "Bad", "params": {"elements": {"name": {"align": "sideways"}}}}
+    )
+    assert bad_align.status_code == 422, bad_align.text
+
+    unknown = await manager.post(
+        "/api/v1/themes", json={"name": "Bad", "params": {"elements": {"name": {"glow": 3}}}}
+    )
+    assert unknown.status_code == 422, unknown.text
+
+    unknown_kind = await manager.post(
+        "/api/v1/themes", json={"name": "Bad", "params": {"elements": {"footer": {"bold": True}}}}
+    )
+    assert unknown_kind.status_code == 422, unknown_kind.text
+
+    empty_rule = await manager.post(
+        "/api/v1/themes", json={"name": "Bad", "params": {"text_rules": [{"text": "   "}]}}
+    )
+    assert empty_rule.status_code == 422, empty_rule.text
+
+
+async def test_manager_switches_between_static_and_dynamic_processors(api, workspace, fresh_client):
+    """CONC-2: the two pool modes are Manager settings, validated and audited."""
+    manager = await fresh_client("manager@example.com", workspace["password"])
+
+    dynamic = await manager.patch(
+        "/api/v1/settings",
+        json={
+            "values": {
+                "llm_pool_mode": "dynamic",
+                "llm_pool_min": 2,
+                "llm_pool_max": 8,
+                "llm_shrink_above_pct": 90,
+            }
+        },
+    )
+    assert dynamic.status_code == 200, dynamic.text
+    assert dynamic.json()["values"]["llm_pool_mode"] == "dynamic"
+
+    bad_mode = await manager.patch("/api/v1/settings", json={"values": {"llm_pool_mode": "turbo"}})
+    assert bad_mode.status_code == 422, bad_mode.text
+
+    out_of_range = await manager.patch("/api/v1/settings", json={"values": {"llm_pool_max": 99}})
+    assert out_of_range.status_code == 422, out_of_range.text
+
+    static = await manager.patch(
+        "/api/v1/settings", json={"values": {"llm_pool_mode": "static", "llm_pool_static_size": 5}}
+    )
+    assert static.status_code == 200, static.text
+    assert static.json()["values"]["llm_pool_static_size"] == 5
+
+
+async def test_pool_status_and_manual_tick_are_available_to_managers(api, workspace, fresh_client):
+    manager = await fresh_client("manager@example.com", workspace["password"])
+    await manager.patch(
+        "/api/v1/settings", json={"values": {"llm_pool_mode": "dynamic", "llm_pool_min": 2, "llm_pool_max": 8}}
+    )
+
+    applied = await manager.post("/api/v1/system/pool/apply")
+    assert applied.status_code == 200, applied.text
+    body = applied.json()
+    assert body["mode"] == "dynamic"
+    assert body["ceiling"] >= body["floor"] >= 1
+    assert body["budget"] <= body["ceiling"]
+
+    status = await manager.get("/api/v1/system/pool")
+    assert status.status_code == 200, status.text
+    payload = status.json()
+    assert payload["state"]["state"] in {"static", "dynamic", "growing", "holding", "shrinking", "steady"}
+    assert payload["settings"]["llm_pool_max"] == 8
+    assert isinstance(payload["active"], int) and isinstance(payload["backlog"], int)
+
+    maker = await api.login("maker@example.com", workspace["password"])
+    forbidden = await maker.get("/api/v1/system/pool")
+    assert forbidden.status_code == 403, forbidden.text
+
+
+@pytest.mark.asyncio
+async def test_a_maker_can_withdraw_a_submission_before_it_is_delivered(api, workspace, db_session):
+    """MKR-3: cancel is ordered-safe and never resurrects the build."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    created = await submit_via_api(maker)
+    job_id = created["job_id"]
+
+    cancelled = await maker.post(f"/api/v1/jobs/{job_id}/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+
+    job = (await db_session.execute(select(Job).where(Job.id == job_id))).scalar_one()
+    assert job.delivery_status == "skipped"
+    assert job.skipped_by == workspace["maker"].id
+    generation = (
+        await db_session.execute(select(Generation).where(Generation.job_id == job_id))
+    ).scalars().one()
+    assert generation.status == "cancelled"
+    assert generation.lease_token is None and generation.claimed_by is None
+
+    # The Maker sees "Cancelled" (a Manager skip keeps saying "Skipped").
+    listing = await maker.get("/api/v1/jobs", params={"date": date.today().isoformat()})
+    row = listing.json()["items"][0]
+    assert row["status"]["status"] == "cancelled"
+    assert row["status"]["label"] == "Cancelled"
+
+    # Cancelling twice, or after delivery, is a conflict rather than a silent no-op.
+    assert (await maker.post(f"/api/v1/jobs/{job_id}/cancel")).status_code == 409
+
+    # Nothing the pipeline does afterwards may bring the build back.
+    await run_pipeline()
+    await db_session.refresh(generation)
+    assert generation.status == "cancelled"
+    assert (await maker.get("/api/v1/jobs", params={"date": date.today().isoformat()})).json()["items"][0][
+        "status"
+    ]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_a_submission_is_owner_scoped(api, workspace, fresh_client):
+    """A Maker only cancels their own; Managers may cancel any; Reviewers may not."""
+    maker = await api.login("maker@example.com", workspace["password"])
+    other = await fresh_client("maker2@example.com", workspace["password"])
+    reviewer = await fresh_client("reviewer@example.com", workspace["password"])
+    manager = await fresh_client("manager@example.com", workspace["password"])
+
+    created = await submit_via_api(maker)
+    job_id = created["job_id"]
+
+    assert (await other.post(f"/api/v1/jobs/{job_id}/cancel")).status_code == 404
+    assert (await reviewer.post(f"/api/v1/jobs/{job_id}/cancel")).status_code == 403
+
+    cancelled = await manager.post(f"/api/v1/jobs/{job_id}/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+
+
+@pytest.mark.asyncio
+async def test_a_delivered_doc_set_cannot_be_withdrawn(api, workspace, db_session):
+    maker = await api.login("maker@example.com", workspace["password"])
+    created = await submit_via_api(maker)
+    await run_pipeline()
+
+    refused = await maker.post(f"/api/v1/jobs/{created['job_id']}/cancel")
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["error"]["message"] == "a delivered doc set cannot be cancelled"

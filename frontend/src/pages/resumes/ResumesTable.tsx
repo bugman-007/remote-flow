@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
-import { Download, Eye, ListTree, Pencil, Play, RefreshCw, SkipForward, Sparkles, Star } from "lucide-react";
+import { Download, ExternalLink, Eye, ListTree, Pencil, Play, RefreshCw, SkipForward, Sparkles, Star, Trash2 } from "lucide-react";
 import { api, downloadBlob, errorMessage } from "../../lib/api";
 import { formatDateTime, formatTime, formatSeq } from "../../lib/format";
 import { Badge, Button, Checkbox, Input } from "../../ui/primitives";
 import { Table, TableState } from "../../ui/table";
 import { DropdownMenu, MenuItem, MenuSeparator } from "../../ui/menu";
-import { Dialog } from "../../ui/dialog";
+import { ConfirmDialog, Dialog } from "../../ui/dialog";
 import { FileChips } from "../../components/FileChips";
 import { StatusChip } from "../../components/StatusChip";
 import { t } from "../../i18n";
@@ -41,10 +41,12 @@ export function ResumesTable({
 }: Props) {
   const [renaming, setRenaming] = useState<DocSetRow | null>(null);
   const [regenerating, setRegenerating] = useState<DocSetRow | null>(null);
+  const [deleting, setDeleting] = useState<DocSetRow | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const isManager = role === "manager";
-  const columns = isManager ? 9 : 7;
+  const columns = isManager ? 10 : 8;
 
   const toggle = (id: string) => {
     onSelectionChange(selection.includes(id) ? selection.filter((value) => value !== id) : [...selection, id]);
@@ -67,6 +69,22 @@ export function ResumesTable({
   };
 
   const sortArrow = (key: string) => (sort.key === key ? (sort.dir === "asc" ? " ↑" : " ↓") : "");
+
+  const deleteRow = async () => {
+    if (!deleting) return;
+    setBusy(true);
+    setDeleteError(null);
+    try {
+      await api.del(`/doc-sets/${deleting.doc_set_id}`, { confirm: true });
+      setNotice(t("toast.deleted", { count: 1 }));
+      setDeleting(null);
+      onChanged();
+    } catch (caught) {
+      setDeleteError(errorMessage(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <>
@@ -105,6 +123,7 @@ export function ResumesTable({
               {sortArrow("ready")}
             </th>
             <th>{t("resumes.columns.files")}</th>
+            <th>{t("resumes.columns.jobLink")}</th>
             <th className="w-10" />
           </tr>
         </thead>
@@ -133,8 +152,8 @@ export function ResumesTable({
                       </td>
                     ) : null}
                     <td className="font-mono text-xs">{formatSeq(row.seq_no)}</td>
-                    <td className="max-w-[14rem] truncate">
-                      <button type="button" className="text-left hover:underline" onClick={() => onOpen(row)}>
+                    <td className="max-w-[10rem] truncate" title={row.doc_set?.company_name ?? undefined}>
+                      <button type="button" className="max-w-full truncate text-left align-middle hover:underline" onClick={() => onOpen(row)}>
                         {row.doc_set?.company_name ?? t("common.unknown")}
                       </button>
                       {row.duplicate_of ? (
@@ -148,7 +167,7 @@ export function ResumesTable({
                         </Badge>
                       ) : null}
                     </td>
-                    <td className="max-w-[16rem] truncate">{row.doc_set?.job_title ?? "—"}</td>
+                    <td className="max-w-[10rem] truncate" title={row.doc_set?.job_title ?? undefined}>{row.doc_set?.job_title ?? "—"}</td>
                     {isManager ? <td className="max-w-[10rem] truncate">{row.maker_name ?? "—"}</td> : null}
                     <td>
                       <StatusChip status={row.status} role={role} />
@@ -173,7 +192,10 @@ export function ResumesTable({
                     </td>
                     <td className="whitespace-nowrap text-xs text-muted-foreground">{formatTime(row.released_at)}</td>
                     <td>
-                      <FileChips files={row.files} expiredAt={row.expired ? row.doc_set?.files_expired_at : null} disabled={!ready} />
+                      <FileChips className="flex-nowrap" files={row.files} expiredAt={row.expired ? row.doc_set?.files_expired_at : null} disabled={!ready} />
+                    </td>
+                    <td>
+                      <JobLinkButton link={row.job_link} ready={ready} />
                     </td>
                     <td>
                       <DropdownMenu>
@@ -267,6 +289,17 @@ export function ResumesTable({
                                   <Eye className="mr-2 inline h-3.5 w-3.5" />
                                   {t("resumes.viewLlmJson")}
                                 </MenuItem>
+                                <MenuSeparator />
+                                <MenuItem
+                                  onSelect={() => {
+                                    close();
+                                    setDeleteError(null);
+                                    setDeleting(row);
+                                  }}
+                                >
+                                  <Trash2 className="mr-2 inline h-3.5 w-3.5 text-destructive" />
+                                  <span className="text-destructive">{t("resumes.deletePermanently")}</span>
+                                </MenuItem>
                               </>
                             ) : null}
                           </>
@@ -290,6 +323,22 @@ export function ResumesTable({
           await act(() => api.patch(`/doc-sets/${renaming.doc_set_id}`, values), t("toast.saved"));
           setRenaming(null);
         }}
+      />
+
+      <ConfirmDialog
+        open={Boolean(deleting)}
+        destructive
+        busy={busy}
+        title={t("resumes.deleteTitle")}
+        message={
+          <>
+            {t("resumes.deleteOne")}
+            {deleteError ? <span className="mt-2 block text-destructive">{deleteError}</span> : null}
+          </>
+        }
+        confirmLabel={t("resumes.deleteConfirmLabel")}
+        onCancel={() => setDeleting(null)}
+        onConfirm={() => void deleteRow()}
       />
 
       <Dialog
@@ -370,5 +419,30 @@ function RenameDialog({
       <label className="rf-label mt-3">{t("resumes.renameTitle")}</label>
       <Input value={title} onChange={(event) => setTitle(event.target.value)} />
     </Dialog>
+  );
+}
+
+/**
+ * BULK-1: opens the posting the resume was made for. Only Bulk Resumes rows have
+ * a link (a pasted JD has none), and it opens once the resume is ready.
+ */
+function JobLinkButton({ link, ready }: { link?: string | null; ready: boolean }) {
+  const safe = link && /^https?:\/\//i.test(link) ? link : null;
+  const enabled = Boolean(safe) && ready;
+  const hint = !safe ? t("resumes.jobLink.none") : !ready ? t("resumes.jobLink.notReady") : safe;
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      className="gap-1 whitespace-nowrap px-2.5"
+      disabled={!enabled}
+      title={hint}
+      onClick={() => {
+        if (safe) window.open(safe, "_blank", "noopener,noreferrer");
+      }}
+    >
+      <ExternalLink className="h-3.5 w-3.5" />
+      {t("resumes.jobLink.open")}
+    </Button>
   );
 }

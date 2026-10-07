@@ -4,10 +4,10 @@ import { AppShell } from "./layout/AppShell";
 import { LoginPage } from "./pages/LoginPage";
 import { ChangePasswordPage } from "./pages/ChangePasswordPage";
 import { JdUploadPage } from "./pages/JdUploadPage";
-import { MyProfilePage } from "./pages/MyProfilePage";
 import { ResumesPage } from "./pages/ResumesPage";
 import { InterviewsPage } from "./pages/InterviewsPage";
 import { ProfilesPage } from "./pages/ProfilesPage";
+import { BulkResumesPage } from "./pages/BulkResumesPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { UsersPage } from "./pages/UsersPage";
 
@@ -24,10 +24,10 @@ export function App() {
         }
       >
         <Route path="/jd-upload" element={<RequireAuth roles={["maker"]}><JdUploadPage /></RequireAuth>} />
-        <Route path="/my-profile" element={<RequireAuth roles={["maker"]}><MyProfilePage /></RequireAuth>} />
         <Route path="/resumes" element={<RequireAuth roles={["maker", "manager"]}><ResumesPage /></RequireAuth>} />
         <Route path="/interviews" element={<RequireAuth roles={["manager", "reviewer"]}><InterviewsPage /></RequireAuth>} />
         <Route path="/profiles" element={<RequireAuth roles={["manager"]}><ProfilesPage /></RequireAuth>} />
+        <Route path="/bulk-resumes" element={<RequireAuth roles={["manager"]}><BulkResumesPage /></RequireAuth>} />
         <Route path="/settings" element={<RequireAuth roles={["manager"]}><SettingsPage /></RequireAuth>} />
         <Route path="/users" element={<RequireAuth roles={["manager"]}><UsersPage /></RequireAuth>} />
       </Route>

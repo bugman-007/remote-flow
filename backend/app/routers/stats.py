@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.deps import manager_required
 from app.models import GenerationAttempt, Job, LLMProvider, Profile, User
+from app.services import settings_store
 from app.services import stats as stats_service
 from app.utils import utcnow
 
@@ -27,7 +28,7 @@ async def maker_stats(
 ):
     from app.models import DailyMakerStat
 
-    today = date.today()
+    today = await settings_store.platform_today(session)
     window_from = date_from or today - timedelta(days=7)
     window_to = date_to or today
     if window_from <= today <= window_to:

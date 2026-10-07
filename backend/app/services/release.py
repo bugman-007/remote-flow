@@ -245,10 +245,7 @@ async def fill_doc_set_names(session: AsyncSession, job: Job, generation: Genera
         session.add(doc_set)
         await session.flush()
     name, basename = core.make_names(data)
-    title = str(data.get("title") or "").strip()
-    if not title:
-        subtitle = str(data.get("subtitle") or "")
-        title = subtitle.split("·")[0].split("|")[0].strip()
+    title = core.role_title(data)
     doc_set.candidate_name = name
     doc_set.company_name = str(data.get("target_company") or "").strip() or None
     doc_set.job_title = title or None

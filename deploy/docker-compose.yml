@@ -16,11 +16,22 @@ x-backend-env: &backend-env
   PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
   ENVIRONMENT: production
   COOKIE_SECURE: ${COOKIE_SECURE:-false}
-  LLM_CONCURRENCY: ${LLM_CONCURRENCY:-16}
+  # CONC-2: the llm pool is autoscaled inside [MIN, MAX]; the Manager's
+  # Static/Dynamic setting moves this range at runtime through the controller.
+  LLM_POOL_MIN: ${LLM_POOL_MIN:-2}
+  LLM_POOL_MAX: ${LLM_POOL_MAX:-8}
+  # CONC-2: who runs the LLM stage. `runner` = one asyncio process (worker-llm)
+  # with many provider calls in flight; `celery` = the old prefork pool (rollback).
+  # Every service must agree: the API and the sweeps decide whether LLM work is
+  # published to a queue or read from the database by the runner.
+  LLM_EXECUTOR: ${LLM_EXECUTOR:-runner}
+  # Most provider calls the runner keeps in flight; the Manager's Processors
+  # setting is clamped to it. Measured: ~310 MB for 150 calls in flight.
+  LLM_RUNNER_MAX_CONCURRENCY: ${LLM_RUNNER_MAX_CONCURRENCY:-150}
   RENDER_CONCURRENCY: ${RENDER_CONCURRENCY:-1}
   RB_PDF_BACKEND: ${RB_PDF_BACKEND:-unoserver}
   AUTO_CREATE_SCHEMA: "false"
-  TZ: ${CONTAINER_TZ:-UTC}
+  TZ: ${CONTAINER_TZ:-America/New_York}
 
 x-backend-base: &backend-base
   build:
@@ -77,8 +88,27 @@ services:
     <<: *backend-base
     environment:
       <<: *backend-env
-    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "llm", "-c", "${LLM_CONCURRENCY:-16}", "-P", "gevent", "--prefetch-multiplier", "1", "-l", "INFO", "-n", "llm@%h"]
-    mem_limit: 512m
+    # LLM_EXECUTOR=runner (default): `manage.py llm-runner`, one asyncio process
+    # that keeps up to LLM_RUNNER_MAX_CONCURRENCY provider calls in flight. A call
+    # waits on the provider ~99 % of the time, so it costs a few MB here instead
+    # of a ~270 MB prefork child. On SIGTERM it stops starting calls and lets the
+    # running ones finish (stop_grace_period covers the 600 s provider timeout).
+    #
+    # LLM_EXECUTOR=celery (rollback): the prefork pool. Never gevent - every task
+    # drives its own asyncio loop and gevent's patched selectors hang them.
+    # --autoscale lets the pool controller resize it; it needs ~270 MB per child,
+    # so also set LLM_WORKER_MEM_LIMIT=3072m.
+    command:
+      - sh
+      - -c
+      - >-
+        if [ "$${LLM_EXECUTOR:-runner}" = "celery" ]; then
+        exec celery -A app.workers.celery_app.celery_app worker -Q llm -P prefork
+        --autoscale "$${LLM_POOL_MAX:-8},$${LLM_POOL_MIN:-2}" --prefetch-multiplier 1 -l INFO -n "llm@%h";
+        else exec python manage.py llm-runner; fi
+    # Runner: ~310 MB measured with 150 calls in flight (fake provider returning
+    # production-sized responses), ~2.5x headroom.
+    mem_limit: ${LLM_WORKER_MEM_LIMIT:-768m}
     cpu_shares: 512
     stop_grace_period: 620s
 
@@ -91,7 +121,7 @@ services:
       - .env
     environment:
       <<: *backend-env
-      RENDER_CONCURRENCY: "1"
+      RENDER_CONCURRENCY: ${RENDER_CONCURRENCY:-2}
       RB_PDF_BACKEND: ${RB_PDF_BACKEND:-unoserver}
       UNOSERVER_MAX_CONVERSIONS: "200"
       UNOSERVER_MAX_RSS_MB: "700"
@@ -103,7 +133,11 @@ services:
     volumes:
       - storage:/storage
     # HW-1: lowest CPU share plus nice -n 10 inside the entrypoint.
-    mem_limit: 1500m
+    # Two children (RENDER_CONCURRENCY) smooth the burst when several LLM calls
+    # land at once: one conversion is ~0.7 s of a single core and ~215 MB, and a
+    # solo child is idle almost always. Raise it only with the free cores to match.
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "render", "-c", "${RENDER_CONCURRENCY:-2}", "-P", "prefork", "--prefetch-multiplier", "1", "-l", "INFO", "-n", "render@%h"]
+    mem_limit: 1536m
     cpu_shares: 256
     stop_grace_period: 200s
 
@@ -111,8 +145,8 @@ services:
     <<: *backend-base
     environment:
       <<: *backend-env
-    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "ops", "-c", "2", "-P", "gevent", "-B", "-l", "INFO", "-n", "ops@%h"]
-    mem_limit: 192m
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "ops", "-c", "1", "-B", "-l", "INFO", "-n", "ops@%h"]
+    mem_limit: 256m
     cpu_shares: 512
     stop_grace_period: 60s
 

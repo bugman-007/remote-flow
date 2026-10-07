@@ -95,6 +95,10 @@ export interface DocSetRow {
   released_late: boolean;
   skipped_at: string | null;
   duplicate_of: string | null;
+  /** BULK-1: ``bulk`` rows came from a Bulk Resumes CSV and carry its job link. */
+  source?: "manual" | "bulk";
+  job_link?: string | null;
+  skip_reason?: "duplicate" | "failed" | null;
   status: DerivedStatus;
   doc_set: DocSetSummary | null;
   generation_count: number;
@@ -121,6 +125,9 @@ export interface JobRow {
   skipped_at: string | null;
   duplicate_of: string | null;
   duplicate_seq?: number | null;
+  source?: "manual" | "bulk";
+  job_link?: string | null;
+  skip_reason?: "duplicate" | "failed" | null;
   status: DerivedStatus;
   doc_set: DocSetSummary | null;
 }
@@ -190,9 +197,51 @@ export interface PromptVersion {
   diff?: { op: "add" | "remove" | "context" | "hunk"; line: string }[] | null;
 }
 
+export interface GroupRef {
+  id: string;
+  name: string;
+  color: string;
+}
+
+/** PRO-11: a named, coloured set of Profiles (one group per Profile). */
+export interface ProfileGroup extends GroupRef {
+  profile_ids: string[];
+  profile_count: number;
+  created_at: string;
+}
+
+export interface BulkBatch {
+  id: string;
+  filename: string | null;
+  created_at: string;
+  generated_at: string | null;
+  usable_rows: number;
+  rejected_rows: number;
+  rejected: { row: number; reason: string }[];
+  summary: BulkSummary | null;
+}
+
+export interface BulkSummary {
+  count: number;
+  created: number;
+  profiles: {
+    profile_id: string;
+    profile_name: string;
+    maker_id: string;
+    maker_name: string;
+    created: number;
+    skipped_duplicates: number;
+    short_by: number;
+  }[];
+  skipped_profiles: { profile_id: string; profile_name: string; reason: string }[];
+  csv_duplicates: number;
+  rejected_rows: number;
+}
+
 export interface Profile {
   id: string;
   name: string;
+  group?: GroupRef | null;
   url: string | null;
   description: string | null;
   start_date: string | null;
@@ -235,18 +284,77 @@ export interface Provider {
   last_error: string | null;
 }
 
+/** One inline styling rule (Appendix C.2): text is matched case-insensitively. */
+export interface ThemeTextRule {
+  text: string;
+  bold?: boolean | null;
+  weight?: number | null;
+  italic?: boolean | null;
+  underline?: boolean | null;
+  uppercase?: boolean | null;
+  color?: string | null;
+  bg?: string | null;
+}
+
+/** Per-element style override; only the keys present are overridden. */
+export type ThemeElementStyle = Record<string, string | number | boolean | null>;
+
 export interface ThemeParams {
   font?: string;
   size?: number;
   accent?: string;
   background?: string | null;
+  bg_color?: string;
+  body_color?: string;
+  muted_color?: string;
+  bullet_glyph?: string;
+  page_size?: string;
   line_height?: number;
   section_gap?: number;
   margin_top?: number;
   margin_right?: number;
   margin_bottom?: number;
   margin_left?: number;
+  elements?: Record<string, ThemeElementStyle>;
+  text_rules?: ThemeTextRule[];
   [key: string]: unknown;
+}
+
+export interface ThemeField {
+  key: string;
+  type: string;
+  min: number | null;
+  max: number | null;
+  step: number | null;
+  default: unknown;
+  group?: string;
+  options: string[] | null;
+  font_labels: { name: string }[] | null;
+}
+
+export interface ThemeElementField {
+  key: string;
+  type: string;
+  min: number | null;
+  max: number | null;
+  step: number | null;
+}
+
+export interface ThemeEditorSpec {
+  elements: { key: string; label: string; fields: ThemeElementField[]; aligns: string[] }[];
+  element_labels: Record<string, string>;
+  text_rules: { fields: { key: string; type: string }[]; max: number };
+  presets: { key: string; name: string; params: ThemeParams }[];
+  page_sizes: string[];
+  aligns: string[];
+  generator_version: string;
+}
+
+export interface ThemeSchema {
+  fields: ThemeField[];
+  defaults: ThemeParams;
+  fonts: { name: string; pdf_substitute: string }[];
+  editor: ThemeEditorSpec;
 }
 
 export interface Theme {
@@ -410,6 +518,7 @@ export interface Settings {
   llm_timeout_s: number;
   render_timeout_s: number;
   max_llm_attempts: number;
+  llm_single_request: boolean;
   max_render_attempts: number;
   show_selection_to_makers: boolean;
   default_interview_template_id: string | null;
@@ -420,7 +529,50 @@ export interface Settings {
   disk_warn_pct: number;
   disk_pause_intake_pct: number;
   disk_pause_render_pct: number;
+  llm_pool_mode: "static" | "dynamic";
+  llm_pool_static_size: number;
+  llm_pool_min: number;
+  llm_pool_max: number;
+  llm_grow_below_pct: number;
+  llm_admit_above_pct: number;
+  llm_shrink_above_pct: number;
+  llm_shrink_below_pct: number;
+  llm_scale_step: number;
+  llm_scale_interval_s: number;
+  llm_shrink_cooldown_s: number;
   [key: string]: unknown;
+}
+
+/** CONC-2: what the pool controller decided last, and why. */
+export interface PoolState {
+  mode?: "static" | "dynamic";
+  /** Who runs the LLM stage: one prefork process per call, or the async runner. */
+  executor?: "celery" | "runner";
+  /** Runner only: the most parallel calls this server holds (LLM_RUNNER_MAX_CONCURRENCY). */
+  hard_cap?: number | null;
+  state: string;
+  reason?: string;
+  floor?: number;
+  ceiling?: number;
+  size?: number;
+  budget?: number;
+  active?: number;
+  inflight?: number;
+  backlog?: number;
+  memory_used_pct?: number;
+  memory_available_mb?: number;
+  memory_total_mb?: number;
+  cpu_pct?: number | null;
+  updated_at?: number;
+  applied?: boolean;
+}
+
+export interface PoolStatus {
+  state: PoolState;
+  settings: Settings;
+  active: number;
+  inflight: number;
+  backlog: number;
 }
 
 export interface RetentionPlan {

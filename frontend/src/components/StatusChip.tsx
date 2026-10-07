@@ -28,6 +28,7 @@ export function statusLabel(status: DerivedStatus | undefined, role: Role): stri
   if (status.status === "needs_attention") {
     return role === "manager" ? t("resumes.filterStatus.attention") : t("resumes.waitingForManager");
   }
+  if (status.status === "cancelled") return t("common.cancelled");
   if (status.status === "released" && status.released_late) return t("resumes.releasedLate");
   if (status.status === "waiting" && status.blocker_seq) {
     const seq = formatSeq(status.blocker_seq);

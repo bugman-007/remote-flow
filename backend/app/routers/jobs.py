@@ -261,6 +261,36 @@ async def skip_job(
     return {"ok": True}
 
 
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(
+    job_id: str,
+    request: Request,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """MKR-3: withdraw a submission that has not been delivered yet.
+
+    Makers may only cancel their own submissions (a foreign id answers 404, so
+    ids stay unguessable); Managers may cancel any. Reviewers cannot cancel.
+    """
+    from app.routers.common import ensure_maker_scope, get_job
+
+    if user.role == "reviewer":
+        raise APIError("forbidden", "Reviewers cannot cancel submissions.", status_code=403)
+    job = await get_job(session, job_id)
+    ensure_maker_scope(user, job)
+    try:
+        generation = await pipeline.cancel_job(session, job=job, actor_id=user.id)
+    except ValueError as exc:
+        raise APIError("invalid_cancel", str(exc), status_code=409) from exc
+    session.add(
+        AuditLog(actor_id=user.id, action="job.cancel", entity_type="job", entity_id=job.id, ip=client_ip(request))
+    )
+    await session.commit()
+    await dispatch.flush_dispatches(session)
+    return {"ok": True, "generation_id": generation.id if generation else None}
+
+
 @router.get("/me/limit")
 async def my_limit(user: User = Depends(maker_required), session: AsyncSession = Depends(get_session)):
     day = await intake.server_today(session)

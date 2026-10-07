@@ -36,6 +36,12 @@ class BulkSelectRequest(Model):
     selected: bool = True
 
 
+class BulkDeleteRequest(Model):
+    """Owner request: permanently remove the selected resumes, files included."""
+
+    ids: list[str]
+
+
 class ZipRequest(Model):
     ids: list[str]
     generation: str | None = None
@@ -268,3 +274,26 @@ class CsvImportRequest(Model):
 
 class SelectRequest(Model):
     selected: bool = True
+
+
+class ProfileGroupCreate(Model):
+    """PRO-11: "Save Group" - a new group, or more Profiles for an existing name."""
+
+    name: str = Field(min_length=1, max_length=120)
+    profile_ids: list[str] = Field(min_length=1, max_length=500)
+
+
+class ProfileGroupUpdate(Model):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class ProfileGroupMembers(Model):
+    profile_ids: list[str] = Field(min_length=1, max_length=500)
+
+
+class BulkGenerateRequest(Model):
+    """BULK-1: the first ``count`` usable CSV rows for every chosen Profile."""
+
+    group_id: str | None = None
+    profile_ids: list[str] = Field(default_factory=list, max_length=500)
+    count: int = Field(ge=1, le=10000)

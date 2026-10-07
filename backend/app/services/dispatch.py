@@ -6,6 +6,7 @@ import asyncio
 import logging
 from typing import Any, Protocol
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -44,10 +45,43 @@ class InlineDispatcher:
 
 class CeleryDispatcher:
     async def enqueue(self, generation_id: str, stage: str, *, high_priority: bool = False) -> None:
+        self.send(generation_id, stage, high_priority=high_priority)
+
+    def send(self, generation_id: str, stage: str, *, high_priority: bool = False) -> None:
+        from app.config import get_settings
         from app.workers.celery_app import celery_app
 
+        if stage == "llm" and get_settings().llm_runner_enabled:
+            # CONC-2: the LLM runner claims straight from the database in release
+            # order, so there is no queue message to publish (nobody would consume it).
+            return
         task = "app.workers.tasks.run_llm" if stage == "llm" else "app.workers.tasks.run_render"
         celery_app.send_task(task, args=[generation_id], priority=9 if high_priority else 5)
+
+
+class BackgroundCeleryDispatcher(CeleryDispatcher):
+    """``CeleryDispatcher`` for the LLM runner, whose event loop must never block.
+
+    ``send_task`` is blocking network I/O, and in the runner one event loop carries
+    every provider call in flight, so publishes run on one background thread
+    (a single thread keeps them serialised on Celery's shared producer pool).
+    """
+
+    def __init__(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="celery-dispatch")
+
+    async def enqueue(self, generation_id: str, stage: str, *, high_priority: bool = False) -> None:
+        import functools
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            self._executor, functools.partial(self.send, generation_id, stage, high_priority=high_priority)
+        )
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=True)
 
 
 _dispatcher: Dispatcher | None = None
@@ -72,12 +106,30 @@ def enqueue_after_commit(session: AsyncSession, generation_id: str, stage: str, 
 async def flush_dispatches(session: AsyncSession) -> int:
     """Call after ``commit()``; safe to call when nothing is pending."""
     pending: list[tuple[str, str, bool]] = session.info.pop(DISPATCH_KEY, [])
+    if not pending:
+        return 0
     dispatcher = get_dispatcher()
+    accepted: list[str] = []
     for generation_id, stage, high_priority in pending:
         try:
             await dispatcher.enqueue(generation_id, stage, high_priority=high_priority)
         except Exception:  # noqa: BLE001 - the dispatch sweep will retry
             logger.exception("dispatch failed", extra={"generation_id": generation_id, "stage": stage})
+        else:
+            accepted.append(generation_id)
+    if accepted:
+        from app.models import Generation
+        from app.utils import utcnow
+
+        # PIPE-3: record that the broker took this work. A build left on ``pending``
+        # while its task is already running is re-published by every ``dispatch_sweep``
+        # pass, and each duplicate burns a worker slot waiting on the row lock.
+        await session.execute(
+            update(Generation)
+            .where(Generation.id.in_(accepted))
+            .values(dispatch_state="sent", dispatched_at=utcnow())
+        )
+        await session.commit()
     return len(pending)
 
 
@@ -88,3 +140,10 @@ def dispatch_state_payload(generation: Any) -> dict:
         "status": generation.status,
         "stage": generation.stage,
     }
+
+
+def drop_dispatch(session: AsyncSession, generation_id: str) -> None:
+    """Forget a queued-after-commit dispatch (the build was cancelled before commit)."""
+    pending = session.info.get(DISPATCH_KEY)
+    if pending:
+        session.info[DISPATCH_KEY] = [entry for entry in pending if entry[0] != generation_id]

@@ -6,14 +6,15 @@ import { useToast } from "../../ui/toast";
 import { t } from "../../i18n";
 import type { InterviewTemplate, Settings } from "../../types";
 
-const FIELDS: { key: keyof Settings; label: string; type?: "number" | "text" | "checkbox" }[] = [
-  { key: "timezone", label: "settings.general.timezone", type: "text" },
+const FIELDS: { key: keyof Settings; label: string; type?: "number" | "text" | "checkbox"; hint?: string }[] = [
+  { key: "timezone", label: "settings.general.timezone", type: "text", hint: "settings.general.timezoneHint" },
   { key: "default_daily_limit", label: "settings.general.defaultDailyLimit", type: "number" },
   { key: "min_jd_chars", label: "settings.general.minJd", type: "number" },
   { key: "max_jd_chars", label: "settings.general.maxJd", type: "number" },
   { key: "llm_timeout_s", label: "settings.general.llmTimeout", type: "number" },
   { key: "render_timeout_s", label: "settings.general.renderTimeout", type: "number" },
   { key: "max_llm_attempts", label: "settings.general.maxLlmAttempts", type: "number" },
+  { key: "llm_single_request", label: "settings.general.singleRequest", type: "checkbox", hint: "settings.general.singleRequestHint" },
   { key: "max_render_attempts", label: "settings.general.maxRenderAttempts", type: "number" },
   { key: "show_selection_to_makers", label: "settings.general.showSelection", type: "checkbox" },
 ];
@@ -68,14 +69,14 @@ export function GeneralTab() {
       <div className="grid gap-3 tablet:grid-cols-2">
         {FIELDS.map((field) =>
           field.type === "checkbox" ? (
-            <Field key={String(field.key)} label={t(field.label)}>
+            <Field key={String(field.key)} label={t(field.label)} hint={field.hint ? t(field.hint) : undefined}>
               <Checkbox
                 checked={Boolean(draft[field.key])}
                 onChange={(event) => setDraft({ ...draft, [field.key]: event.target.checked })}
               />
             </Field>
           ) : (
-            <Field key={String(field.key)} label={t(field.label)}>
+            <Field key={String(field.key)} label={t(field.label)} hint={field.hint ? t(field.hint) : undefined}>
               <Input
                 type={field.type === "number" ? "number" : "text"}
                 value={String(draft[field.key] ?? "")}

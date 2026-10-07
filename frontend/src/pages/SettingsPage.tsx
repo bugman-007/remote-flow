@@ -8,6 +8,7 @@ import { ThemesTab } from "./settings/ThemesTab";
 import { GeneralTab } from "./settings/GeneralTab";
 import { RetentionTab } from "./settings/RetentionTab";
 import { SystemStatusTab } from "./settings/SystemStatusTab";
+import { WorkersTab } from "./settings/WorkersTab";
 import type { SystemStatus } from "../types";
 
 const DEFAULTS = { tab: "providers" };
@@ -26,12 +27,13 @@ export function SettingsPage() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-lg font-semibold">{t("settings.title")}</h1>
+      <h1 className="rf-page-title">{t("settings.title")}</h1>
       <Tabs
         items={[
           { id: "providers", label: t("settings.tabs.providers") },
           { id: "themes", label: t("settings.tabs.themes") },
           { id: "general", label: t("settings.tabs.general") },
+          { id: "workers", label: t("settings.tabs.workers") },
           { id: "retention", label: t("settings.tabs.retention") },
           { id: "status", label: t("settings.tabs.status"), badge: attention },
         ]}
@@ -41,6 +43,7 @@ export function SettingsPage() {
       {state.tab === "providers" ? <ProvidersTab /> : null}
       {state.tab === "themes" ? <ThemesTab /> : null}
       {state.tab === "general" ? <GeneralTab /> : null}
+      {state.tab === "workers" ? <WorkersTab /> : null}
       {state.tab === "retention" ? <RetentionTab /> : null}
       {state.tab === "status" ? <SystemStatusTab /> : null}
     </div>

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
@@ -42,10 +43,28 @@ from app.schemas import (
     UseGenerationRequest,
 )
 from app.serializers import feedback_out, file_out, interview_out, profile_out, template_out
-from app.services import events, storage, taxonomy
+from app.services import events, settings_store, storage, taxonomy
 from app.utils import utcnow
 
 router = APIRouter(tags=["interviews"], dependencies=[Depends(csrf_protect)])
+
+
+async def _local_meeting_time(session: AsyncSession, value: datetime | None, tz_name: str | None = None) -> datetime | None:
+    """A time sent without an offset is local time in ``tz_name`` (default: the platform's zone).
+
+    The date and time pickers send wall-clock times such as ``2026-09-28T09:55:00``;
+    storing them as UTC put every meeting hours off.
+    """
+    if value is None or value.tzinfo is not None:
+        return value
+    zone = await settings_store.platform_timezone(session)
+    if tz_name:
+        try:
+            zone = ZoneInfo(tz_name)
+        except (ZoneInfoNotFoundError, ValueError):  # unknown name: keep the platform zone
+            pass
+    return value.replace(tzinfo=zone)
+
 
 #: INT-2 - built-in, non-deletable fields of every template.
 BUILTIN_FIELDS = [
@@ -291,9 +310,9 @@ async def list_interviews(
     if status_id:
         query = query.where(Interview.status_id.in_(status_id))
     if date_from:
-        query = query.where(Interview.meeting_at >= date_from)
+        query = query.where(Interview.meeting_at >= await _local_meeting_time(session, date_from))
     if date_to:
-        query = query.where(Interview.meeting_at <= date_to)
+        query = query.where(Interview.meeting_at <= await _local_meeting_time(session, date_to))
     if q:
         term = q.strip()
         ds_sub = select(DocSet.id).where(
@@ -408,6 +427,7 @@ async def create_interview(
             meeting_at = datetime.fromisoformat(str(values["meeting_time"]).replace("Z", "+00:00"))
         except ValueError:
             raise APIError("invalid_meeting_time", "Meeting time is not a valid datetime.", status_code=422) from None
+    meeting_at = await _local_meeting_time(session, meeting_at, payload.meeting_tz)
     status_row = None
     if payload.status_id:
         status_row = await session.get(InterviewStatus, payload.status_id)
@@ -523,6 +543,10 @@ async def update_interview(
 ):
     interview = await _load_interview(session, interview_id)
     changes = payload.model_dump(exclude_unset=True)
+    if changes.get("meeting_at") is not None:
+        changes["meeting_at"] = await _local_meeting_time(
+            session, changes["meeting_at"], changes.get("meeting_tz") or interview.meeting_tz
+        )
     if "template_id" in changes and changes["template_id"]:
         template = await session.get(InterviewTemplate, changes["template_id"])
         if template is None:

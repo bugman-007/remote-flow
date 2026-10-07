@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ClipboardPaste, Clock, Send, TriangleAlert } from "lucide-react";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ClipboardPaste, Clock, Send, TriangleAlert, X } from "lucide-react";
 import { api, errorMessage, isApiError } from "../lib/api";
 import { formatSeq, formatTime, todayISO } from "../lib/format";
 import { uuid } from "../lib/utils";
 import { Badge, Button, Card, CardHeader, ErrorNote, InfoNote, Spinner } from "../ui/primitives";
+import { ConfirmDialog } from "../ui/dialog";
 import { useToast } from "../ui/toast";
 import { StatusChip } from "../components/StatusChip";
 import { useAuth } from "../auth/AuthProvider";
@@ -34,6 +35,9 @@ interface EtaInfo {
 const FALLBACK_MIN_CHARS = 50;
 const FALLBACK_MAX_CHARS = 200_000;
 
+/** Rows per request for the Recent submissions list (infinite scroll). */
+const RECENT_PAGE_SIZE = 100;
+
 export function JdUploadPage() {
   const { user } = useAuth();
   const { push } = useToast();
@@ -44,6 +48,8 @@ export function JdUploadPage() {
   const [error, setError] = useState<string | null>(null);
   const [blockedReason, setBlockedReason] = useState<"no_profile" | "paused" | null>(null);
   const [lastSeq, setLastSeq] = useState<number | null>(null);
+  const [cancelling, setCancelling] = useState<JobRow | null>(null);
+  const [cancelBusy, setCancelBusy] = useState(false);
   // JD-1: one idempotency key per submission attempt; a retry after a network drop reuses it.
   const pendingKey = useRef<{ key: string; text: string } | null>(null);
 
@@ -59,11 +65,33 @@ export function JdUploadPage() {
     refetchInterval: 30_000,
   });
 
-  const recent = useQuery({
-    queryKey: ["jobs", { date: todayISO(), scope: "recent" }],
-    queryFn: () => api.get<Paginated<JobRow>>("/jobs", { date: todayISO(), page_size: 20 }),
+  // Every submission of the day, newest first, fetched a page at a time as the
+  // list is scrolled (a maker can submit hundreds a day).
+  const today = todayISO();
+  const recent = useInfiniteQuery({
+    queryKey: ["jobs", { date: today, scope: "recent" }],
+    queryFn: ({ pageParam }) =>
+      api.get<Paginated<JobRow>>("/jobs", { date: today, page: pageParam, page_size: RECENT_PAGE_SIZE }),
+    initialPageParam: 1,
+    getNextPageParam: (last) =>
+      last.pagination.page < last.pagination.pages ? last.pagination.page + 1 : undefined,
     refetchInterval: 60_000,
   });
+  const { hasNextPage, isFetchingNextPage, fetchNextPage } = recent;
+  const moreRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const marker = moreRef.current;
+    if (!marker || !hasNextPage) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting) && !isFetchingNextPage) void fetchNextPage();
+      },
+      { rootMargin: "400px" },
+    );
+    observer.observe(marker);
+    return () => observer.disconnect();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   const minChars = limit.data?.min_jd_chars ?? FALLBACK_MIN_CHARS;
   const maxChars = limit.data?.max_jd_chars ?? FALLBACK_MAX_CHARS;
@@ -147,13 +175,38 @@ export function JdUploadPage() {
     }
   };
 
-  const items = recent.data?.items ?? [];
+  /** MKR-3: a submission can be withdrawn until it is delivered. */
+  const withdraw = async () => {
+    if (!cancelling) return;
+    setCancelBusy(true);
+    try {
+      await api.post(`/jobs/${cancelling.id}/cancel`);
+      push({ tone: "success", title: t("jd.cancelled", { seq: formatSeq(cancelling.seq_no) }) });
+      setCancelling(null);
+      void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      void queryClient.invalidateQueries({ queryKey: ["limit"] });
+      void queryClient.invalidateQueries({ queryKey: ["me", "eta"] });
+    } catch (caught) {
+      push({ tone: "error", title: t("jd.cancelFailed"), description: errorMessage(caught) });
+    } finally {
+      setCancelBusy(false);
+    }
+  };
+
+  const items = useMemo(() => {
+    // New submissions shift the pages while the list is open; never show a row twice.
+    const seen = new Set<string>();
+    return (recent.data?.pages ?? [])
+      .flatMap((page) => page.items)
+      .filter((job) => (seen.has(job.id) ? false : (seen.add(job.id), true)));
+  }, [recent.data]);
+  const total = recent.data?.pages[0]?.pagination.total ?? items.length;
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-2">
         <div>
-          <h1 className="text-lg font-semibold">{t("jd.title")}</h1>
+          <h1 className="rf-page-title">{t("jd.title")}</h1>
           <p className="text-sm text-muted-foreground">{t("jd.subtitle")}</p>
         </div>
         <div className="text-right text-sm">
@@ -191,7 +244,7 @@ export function JdUploadPage() {
             }
           }}
           placeholder={t("jd.placeholder")}
-          className="rf-input min-h-[220px] resize-none font-mono text-[13px] leading-relaxed"
+          className="rf-input min-h-[220px] resize-none text-sm leading-relaxed"
           aria-label={t("jd.placeholder")}
         />
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
@@ -232,7 +285,7 @@ export function JdUploadPage() {
       </Card>
 
       <Card>
-        <CardHeader title={t("jd.recent")} description={todayISO()} />
+        <CardHeader title={t("jd.recent")} description={t("jd.recentCount", { date: today, count: total })} />
         {recent.isLoading ? (
           <p className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
             <Spinner /> {t("common.loading")}
@@ -260,11 +313,39 @@ export function JdUploadPage() {
                   {formatTime(job.submitted_at)}
                 </span>
                 <StatusChip status={job.status} role={user?.role ?? "maker"} />
+                {job.delivery_status === "pending" ? (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    title={t("jd.cancelSubmission")}
+                    aria-label={t("jd.cancelSubmission")}
+                    onClick={() => setCancelling(job)}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                ) : null}
               </li>
             ))}
           </ul>
         )}
+        {hasNextPage ? (
+          <div ref={moreRef} className="flex items-center justify-center gap-2 py-3 text-xs text-muted-foreground">
+            {isFetchingNextPage ? <Spinner /> : null}
+            {t("jd.recentMore", { shown: items.length, total })}
+          </div>
+        ) : null}
       </Card>
+
+      <ConfirmDialog
+        open={cancelling !== null}
+        title={t("jd.cancelConfirmTitle", { seq: formatSeq(cancelling?.seq_no ?? 0) })}
+        message={t("jd.cancelConfirmBody")}
+        confirmLabel={t("jd.cancelConfirmLabel")}
+        destructive
+        busy={cancelBusy}
+        onCancel={() => setCancelling(null)}
+        onConfirm={() => void withdraw()}
+      />
 
       {user?.role === "maker" && user.must_change_password ? (
         <InfoNote>

@@ -29,9 +29,11 @@ from app.models import (
     PromptVersion,
 )
 from app.services import events, release, render, settings_store, storage
+from app.services import pool
 from app.services.broker import Broker, get_broker
 from app.services.dispatch import enqueue_after_commit
 from app.services.llm import (
+    REPAIR_ROUNDS,
     LLMError,
     LLMResult,
     ProviderConfig,
@@ -100,6 +102,12 @@ def actionable_statuses(stage: str) -> tuple[str, ...]:
     return ("queued", "retry_wait") if stage == "llm" else ("rendering", "retry_wait")
 
 
+#: A Maker withdrawal stops everything that has not finished yet. A ``ready``
+#: build is deliberately left alone: the work is done, and a Manager can still
+#: release it late (ORD-9) instead of throwing the doc set away.
+CANCELLABLE_STATUSES = ("queued", "llm_running", "rendering", "retry_wait", "needs_attention")
+
+
 def running_status(stage: str) -> str:
     return "llm_running" if stage == "llm" else "rendering"
 
@@ -121,6 +129,21 @@ async def load_generation(session: AsyncSession, generation_id: str) -> Generati
             .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
+
+
+async def defer_llm_dispatch(session: AsyncSession, generation_id: str) -> None:
+    """Hand a build back to ``dispatch_sweep`` without spending an attempt.
+
+    The worker consumed a message it had no capacity for; re-publishing it here
+    would spin the queue, so the row simply goes back to ``pending`` and the
+    next sweep (or the controller opening the throttle) picks it up. The
+    in-flight marker has to be dropped too: the build is no longer on the
+    queue, and leaving it behind would eat an admission slot for 15 minutes.
+    """
+    await pool.clear_inflight(get_broker(), generation_id)
+    await session.execute(
+        update(Generation).where(Generation.id == generation_id).values(dispatch_state="pending")
+    )
 
 
 async def claim_build(
@@ -196,6 +219,28 @@ async def lease_update(session: AsyncSession, generation_id: str, token: str, **
     return result.rowcount == 1
 
 
+async def attempt_budget(session: AsyncSession, stage: str) -> int:
+    """How many attempts a stage gets before Needs attention.
+
+    The Manager's numbers (Settings -> General) apply, never above the server's
+    ``MAX_LLM_ATTEMPTS``/``MAX_RENDER_ATTEMPTS``. "One LLM request per resume"
+    makes the LLM budget exactly one.
+    """
+    settings = get_settings()
+    values = await settings_store.all_settings(session)
+    if stage == "llm":
+        if values.get("llm_single_request"):
+            return 1
+        cap, key = settings.max_llm_attempts, "max_llm_attempts"
+    else:
+        cap, key = settings.max_render_attempts, "max_render_attempts"
+    try:
+        chosen = int(values.get(key) or cap)
+    except (TypeError, ValueError):
+        chosen = cap
+    return max(1, min(chosen, cap))
+
+
 async def budget_used(session: AsyncSession, generation: Generation, stage: str) -> int:
     count = (
         await session.execute(
@@ -216,6 +261,14 @@ def backoff_seconds(stage: str, attempt_no: int, *, retry_after_s: int | None = 
     return int(delay * RETRY_BACKOFF_SCALE)
 
 
+async def _is_cancelled(session: AsyncSession, generation: Generation) -> bool:
+    """Has this build been withdrawn since the attempt was claimed?"""
+    status = (
+        await session.execute(select(Generation.status).where(Generation.id == generation.id))
+    ).scalar_one_or_none()
+    return status == "cancelled"
+
+
 async def record_failure(
     session: AsyncSession,
     generation: Generation,
@@ -228,9 +281,23 @@ async def record_failure(
     retry_after_s: int | None = None,
 ) -> str:
     """PIPE-4/5: apply the stage-aware retry policy and return the new build status."""
-    settings = get_settings()
     stage = claim.stage
     moment = now()
+    if stage == "llm":
+        # The build leaves the LLM queue either way: terminal, or re-dispatched
+        # later (which marks it in flight again).
+        await pool.clear_inflight(get_broker(), generation.id)
+    if await _is_cancelled(session, generation):
+        # The Maker withdrew the submission (or a Manager skipped it) while this
+        # attempt was on the provider: the cancellation stands, an attempt that
+        # failed afterwards must not bring the build back as a retry. The status
+        # is re-read here because sessions run with ``expire_on_commit=False``,
+        # so the object loaded before the provider call is stale by now.
+        generation.status = "cancelled"
+        claim.attempt.outcome = "superseded"
+        claim.attempt.finished_at = moment
+        await session.flush()
+        return "cancelled"
     claim.attempt.outcome = "timed_out" if timed_out else "failed"
     claim.attempt.finished_at = moment
     claim.attempt.error_code = error_code
@@ -252,19 +319,23 @@ async def record_failure(
         generation.consecutive_provider_errors = 0
 
     used = await budget_used(session, generation, stage)
-    budget = settings.max_llm_attempts if stage == "llm" else settings.max_render_attempts
+    budget = await attempt_budget(session, stage)
     if used >= budget:
         generation.status = "needs_attention"
         generation.stage = stage
         generation.next_retry_at = None
         new_status = "needs_attention"
         await emit_build_event(session, generation, "build.needs_attention", {
-            "blocking": generation.kind != "regenerate",
+            # A failed first build no longer holds the Maker's later deliveries:
+            # its job is skipped automatically right below.
+            "blocking": False,
             "kind": generation.kind,
             "stage": stage,
             "attempt": used,
             "error_code": error_code,
         })
+        if generation.kind == "initial":
+            await auto_skip(session, generation.job_id, reason="failed", generation_id=generation.id)
     else:
         delay = backoff_seconds(stage, used, retry_after_s=retry_after_s)
         generation.status = "retry_wait"
@@ -275,6 +346,40 @@ async def record_failure(
 
     await emit_job_status(session, generation, extra={"status": new_status, "attempt": used, "stage": stage})
     return new_status
+
+
+async def auto_skip(session: AsyncSession, job_id: str, *, reason: str, generation_id: str | None = None) -> bool:
+    """Skip a job the system cannot deliver (ORD-5 without a Manager).
+
+    The job leaves the Maker's delivery order so everything ready behind it is
+    released. Its build keeps its error and stays visible under Needs attention;
+    a Manager's Retry now still delivers it late (ORD-9).
+    """
+    job = await session.get(Job, job_id)
+    if job is None or job.delivery_status != "pending":
+        return False
+    job.delivery_status = "skipped"
+    job.skipped_at = now()
+    job.skipped_by = None
+    job.skip_reason = reason
+    await events.emit(
+        session,
+        audience=events.job_audience(job.maker_id),
+        event_type="job.status",
+        payload={"job_id": job.id, "seq_no": job.seq_no, "status": "skipped", "skip_reason": reason},
+        job_id=job.id,
+        generation_id=generation_id,
+        pipeline_event={
+            "from_state": "pending",
+            "to_state": "skipped",
+            "stage": "release",
+            "actor": "system",
+            "details": {"reason": reason},
+        },
+    )
+    await session.flush()
+    await release.release_pass(session, job.maker_id, actor="auto-skip")
+    return True
 
 
 async def maybe_switch_to_fallback(session: AsyncSession, generation: Generation, *, actor: str) -> bool:
@@ -354,26 +459,35 @@ async def emit_build_event(session: AsyncSession, generation: Generation, event_
 # ------------------------------------------------------------------ provider IO
 
 
-async def acquire_provider_slot(broker: Broker, provider: LLMProvider) -> bool:
-    """CONC-3: semaphore + request-per-minute bucket, acquired before the claim."""
+async def acquire_provider_slot(broker: Broker, provider: LLMProvider, *, wait_s: float | None = None) -> str | None:
+    """CONC-3: semaphore + request-per-minute bucket, acquired before the claim.
+
+    The slot marker outlives the call (``timeout_s + grace``), so it is a true
+    concurrency limit: a 30 s marker on a 3-minute call only measured arrivals
+    in the last 30 s and let the pool overshoot the provider's tier.
+    """
     key = f"rf:provider:{provider.id}:slots"
-    acquired = await broker.acquire_slot(
-        key, limit=provider_slot_limit(provider), timeout_s=provider.timeout_s
+    ttl = float(provider.timeout_s) + 120.0
+    token = await broker.acquire_slot(
+        key,
+        limit=provider_slot_limit(provider),
+        timeout_s=provider.timeout_s if wait_s is None else wait_s,
+        ttl_s=ttl,
     )
-    if not acquired:
-        return False
+    if token is None:
+        return None
     for _ in range(4):
         minute = int(time.time() // 60)
         count = await broker.incr(f"rf:provider:{provider.id}:rpm:{minute}", ttl_seconds=120)
         if count <= max(provider.rpm, 1):
-            return True
-        await broker.release_slot(key)
-        return False
-    return True
+            return token
+        await broker.release_slot(key, token)
+        return None
+    return token
 
 
-async def release_provider_slot(broker: Broker, provider: LLMProvider) -> None:
-    await broker.release_slot(f"rf:provider:{provider.id}:slots")
+async def release_provider_slot(broker: Broker, provider: LLMProvider, token: str | None) -> None:
+    await broker.release_slot(f"rf:provider:{provider.id}:slots", token)
 
 
 async def load_provider_config(session: AsyncSession, generation: Generation) -> tuple[LLMProvider, ProviderConfig]:
@@ -449,7 +563,21 @@ async def llm_json_path(session: AsyncSession, generation: Generation) -> Path |
 # ----------------------------------------------------------------- execution
 
 
-async def execute_llm_attempt(session: AsyncSession, generation_id: str, *, worker: str = "worker-llm") -> str | None:
+async def execute_llm_attempt(
+    session: AsyncSession,
+    generation_id: str,
+    *,
+    worker: str = "worker-llm",
+    admission: bool = True,
+    slot_wait_s: float | None = None,
+) -> str | None:
+    """One LLM attempt: admission, provider slot, claim, call, then hand over to render.
+
+    ``admission=False`` is for the async runner, which is the admission gate
+    itself; the call is still counted as running for the Processors panel.
+    ``slot_wait_s`` bounds the wait for a provider slot (default: the provider's
+    timeout).
+    """
     settings = get_settings()
     generation = await load_generation(session, generation_id)
     if generation is None or generation.stage != "llm":
@@ -468,14 +596,36 @@ async def execute_llm_attempt(session: AsyncSession, generation_id: str, *, work
         )
         logger.warning("llm attempt failed before call", extra={"generation_id": generation_id})
         return result
+    # Settings -> General: "one LLM request per resume" - no repair round and no
+    # resend of any kind; a failed reply goes straight to Needs attention.
+    single_request = bool(await settings_store.get_setting(session, "llm_single_request"))
+    config.resend = not single_request
+    # Nothing has been written yet: end the read transaction so no database
+    # connection is held while this attempt waits for admission or a provider slot.
+    await session.commit()
 
-    if not await acquire_provider_slot(broker, provider):
-        enqueue_after_commit(session, generation_id, "llm", high_priority=True)
+    # CONC-2: admission control. The dynamic pool controller publishes a budget
+    # in Redis; a build that cannot get a slot is left for ``dispatch_sweep``
+    # instead of being re-published here, which would spin the queue.
+    budget = await pool.get_budget(broker, fallback=0) if admission else 0
+    active_token = await pool.begin_active(broker, budget=budget, ttl_s=settings.llm_timeout_s + 300)
+    if active_token is None:
+        await defer_llm_dispatch(session, generation_id)
         return None
+    provider_token: str | None = None
     try:
+        provider_token = await acquire_provider_slot(broker, provider, wait_s=slot_wait_s)
+        if provider_token is None:
+            enqueue_after_commit(session, generation_id, "llm", high_priority=True)
+            return None
         claim = await claim_build(session, generation_id, "llm", worker, timeout_s=settings.llm_timeout_s)
         if claim is None:
             return None
+        # PIPE-2: publish the claim before the provider call. The call can take minutes,
+        # and an unpublished claim stays invisible to ``dispatch_sweep`` while its row
+        # lock is held - so a duplicate dispatch would block for the whole call instead
+        # of no-oping immediately.
+        await session.commit()
         job = await session.get(Job, generation.job_id)
         profile_prompt = await prompt_body(session, generation)
         request_payload = {
@@ -487,13 +637,25 @@ async def execute_llm_attempt(session: AsyncSession, generation_id: str, *, work
             "prompt_version_id": generation.prompt_version_id,
             "attempt": claim.attempt_no,
             "jd_chars": len(job.jd_text) if job else 0,
+            "single_request": single_request,
         }
+        # CONC-2: the provider call takes minutes and touches no rows, so its
+        # connection goes back to the pool first. Holding one per call capped the
+        # number of parallel calls at the database's connection limit.
+        await session.commit()
         client = make_client(config)
         try:
             canonical, raw, call_log = await generate_resume(
-                client, provider=config, profile_prompt=profile_prompt, jd_text=job.jd_text if job else ""
+                client,
+                provider=config,
+                profile_prompt=profile_prompt,
+                jd_text=job.jd_text if job else "",
+                repair_rounds=0 if single_request else REPAIR_ROUNDS,
             )
             canonical = inject_job_description(canonical, job.jd_text if job else "")
+            if job and job.job_link:
+                # BULK-1: the posting URL from the CSV is the job link (resume JSON + JD.txt).
+                canonical["job_link"] = job.job_link
         except LLMError as exc:
             await write_llm_artifacts(
                 session,
@@ -542,6 +704,7 @@ async def execute_llm_attempt(session: AsyncSession, generation_id: str, *, work
             claim.attempt.finished_at = now()
             claim.attempt.artifacts_dir = storage.relative_to_root(artifacts_dir)
             return None
+        await pool.clear_inflight(broker, generation.id)
         claim.attempt.outcome = "succeeded"
         claim.attempt.finished_at = now()
         claim.attempt.artifacts_dir = storage.relative_to_root(artifacts_dir)
@@ -559,7 +722,8 @@ async def execute_llm_attempt(session: AsyncSession, generation_id: str, *, work
         await emit_job_status(session, generation, extra={"status": "rendering", "stage": "render"})
         return "rendering"
     finally:
-        await release_provider_slot(broker, provider)
+        await release_provider_slot(broker, provider, provider_token)
+        await pool.end_active(broker, active_token)
 
 
 async def execute_render_attempt(session: AsyncSession, generation_id: str, *, worker: str = "worker-render") -> str | None:
@@ -572,6 +736,9 @@ async def execute_render_attempt(session: AsyncSession, generation_id: str, *, w
     claim = await claim_build(session, generation_id, "render", worker, timeout_s=settings.render_timeout_s)
     if claim is None:
         return None
+    # PIPE-2: same as the LLM stage - the conversion is slow, so the lease is published
+    # (and the row lock released) before the renderer starts.
+    await session.commit()
     doc_set = await release.doc_set_for_job(session, generation.job_id)
     if doc_set is None or not doc_set.storage_dir:
         return await record_failure(
@@ -715,10 +882,14 @@ async def dispatch_sweep(session: AsyncSession, *, stale_after_s: int = 120) -> 
     """PIPE-3: re-enqueue work the queue may have lost."""
     moment = now()
     stale_cutoff = moment - timedelta(seconds=stale_after_s)
+    # CONC-2: with the async runner the LLM stage has no queue to lose work from
+    # (the runner reads the database), so only render work is re-dispatched.
+    stages = ("render",) if get_settings().llm_runner_enabled else ("llm", "render")
     rows = (
         await session.execute(
             select(Generation)
             .where(
+                Generation.stage.in_(stages),
                 Generation.status.in_(("queued", "rendering", "retry_wait")),
                 or_(Generation.next_retry_at.is_(None), Generation.next_retry_at <= moment),
                 Generation.dispatch_state == "pending",
@@ -731,6 +902,7 @@ async def dispatch_sweep(session: AsyncSession, *, stale_after_s: int = 120) -> 
         await session.execute(
             select(Generation)
             .where(
+                Generation.stage.in_(stages),
                 Generation.status.in_(("queued", "rendering", "retry_wait")),
                 or_(Generation.next_retry_at.is_(None), Generation.next_retry_at <= moment),
                 Generation.dispatch_state == "sent",
@@ -742,8 +914,22 @@ async def dispatch_sweep(session: AsyncSession, *, stale_after_s: int = 120) -> 
             .limit(500)
         )
     ).scalars().all()
+    broker = get_broker()
+    budget = await pool.get_budget(broker, fallback=0)
+    room: int | None = None
+    if budget > 0:
+        room = max(0, budget - await pool.inflight_count(broker))
     dispatched = 0
     for generation in [*rows, *stale]:
+        if generation.stage == "llm":
+            # CONC-2: never publish more LLM work than the pool can hold. Builds
+            # that do not fit stay ``pending`` and are picked up by the next
+            # sweep once the controller opens the throttle again.
+            if room is not None and room <= 0:
+                continue
+            if room is not None:
+                room -= 1
+            await pool.mark_inflight(broker, generation.id)
         generation.dispatch_state = "sent"
         generation.dispatched_at = moment
         enqueue_after_commit(session, generation.id, generation.stage, high_priority=generation.status == "retry_wait")
@@ -825,6 +1011,10 @@ async def retry_now(session: AsyncSession, *, job: Job, mode: str, actor_id: str
         profile = await session.get(Profile, job.profile_id) if job.profile_id else None
         if profile is None:
             raise ValueError("job has no profile")
+        failed = await release.initial_generation(session, job)
+        if failed is not None and failed.status == "needs_attention":
+            # The automatic skip kept the failed build visible; the retry replaces it.
+            failed.status = "cancelled"
         return await snapshots.create_generation(
             session, job=job, profile=profile, kind="retry_after_skip", created_by=actor_id
         )
@@ -929,6 +1119,81 @@ async def skip_job(session: AsyncSession, *, job: Job, actor_id: str | None) -> 
     )
     await session.flush()
     await release.release_pass(session, job.maker_id, actor="skip")
+
+
+async def cancel_job(
+    session: AsyncSession, *, job: Job, actor_id: str | None, reason: str | None = None
+) -> Generation | None:
+    """Withdraw a submission that has not been delivered yet (MKR-3).
+
+    A provider call already on the wire cannot be aborted, so the build is marked
+    ``cancelled`` and its lease is dropped instead: when the worker comes back,
+    ``lease_update`` no longer matches, the attempt is superseded and nothing is
+    rendered or released. The job itself becomes ``skipped`` - that is what moves
+    the Maker's delivery cursor past it, and without it a withdrawn job would
+    block every later submission for that Maker.
+    """
+    if job.delivery_status == "released":
+        raise ValueError("a delivered doc set cannot be cancelled")
+    if job.delivery_status == "skipped":
+        raise ValueError("this submission has already been cancelled")
+    broker = get_broker()
+    generations = (
+        await session.execute(select(Generation).where(Generation.job_id == job.id))
+    ).scalars().all()
+    stopped: list[Generation] = []
+    for generation in generations:
+        if generation.status not in CANCELLABLE_STATUSES:
+            continue
+        generation.status = "cancelled"
+        generation.lease_token = None
+        generation.lease_expires_at = None
+        generation.claimed_by = None
+        generation.next_retry_at = None
+        stopped.append(generation)
+        await pool.clear_inflight(broker, generation.id)
+        await events.emit(
+            session,
+            audience=events.job_audience(job.maker_id),
+            event_type="job.status",
+            payload={
+                "job_id": job.id,
+                "generation_id": generation.id,
+                "generation_no": generation.generation_no,
+                "status": "cancelled",
+            },
+            job_id=job.id,
+            generation_id=generation.id,
+            pipeline_event={
+                "from_state": None,
+                "to_state": "cancelled",
+                "stage": generation.stage,
+                "actor": actor_id or "maker",
+                "details": {"reason": reason} if reason else {},
+            },
+        )
+    initial = await release.initial_generation(session, job)
+    job.delivery_status = "skipped"
+    job.skipped_at = now()
+    job.skipped_by = actor_id
+    await events.emit(
+        session,
+        audience=events.job_audience(job.maker_id),
+        event_type="job.status",
+        payload={"job_id": job.id, "seq_no": job.seq_no, "status": "cancelled"},
+        job_id=job.id,
+        generation_id=initial.id if initial else None,
+        pipeline_event={
+            "from_state": "pending",
+            "to_state": "cancelled",
+            "stage": "cancel",
+            "actor": actor_id or "maker",
+            "details": {"stopped": len(stopped), "reason": reason} if reason else {"stopped": len(stopped)},
+        },
+    )
+    await session.flush()
+    await release.release_pass(session, job.maker_id, actor="cancel")
+    return initial
 
 
 async def cancel_generation(session: AsyncSession, *, generation: Generation, actor_id: str | None) -> None:

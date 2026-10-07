@@ -28,9 +28,9 @@ dev-web: ## Run the Vite dev server (proxies /api to :8000)
 	cd $(FRONTEND) && npm run dev
 
 dev-workers: ## Run the three Celery queues against local Redis (PIPE-3)
-	cd $(BACKEND) && .venv/bin/celery -A app.workers.celery_app.celery_app worker -Q llm -c 4 -P gevent -n llm@%h & \
+	cd $(BACKEND) && .venv/bin/celery -A app.workers.celery_app.celery_app worker -Q llm -c 4 -n llm@%h & \
 	cd $(BACKEND) && .venv/bin/celery -A app.workers.celery_app.celery_app worker -Q render -c 1 -n render@%h & \
-	cd $(BACKEND) && .venv/bin/celery -A app.workers.celery_app.celery_app worker -Q ops -c 2 -P gevent -B -n ops@%h
+	cd $(BACKEND) && .venv/bin/celery -A app.workers.celery_app.celery_app worker -Q ops -c 1 -B -n ops@%h
 
 test: test-backend test-frontend ## Run every test suite
 

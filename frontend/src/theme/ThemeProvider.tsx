@@ -9,8 +9,8 @@ interface ThemeContextValue {
 }
 
 const ThemeContext = createContext<ThemeContextValue>({
-  mode: "system",
-  resolved: "light",
+  mode: "dark",
+  resolved: "dark",
   setMode: () => undefined,
 });
 
@@ -21,7 +21,8 @@ export function useThemeMode(): ThemeContextValue {
 const STORAGE_KEY = "rf.theme";
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [mode, setModeState] = useState<Mode>(() => (localStorage.getItem(STORAGE_KEY) as Mode | null) ?? "system");
+  // The interface is designed dark-first; light and "system" remain a choice.
+  const [mode, setModeState] = useState<Mode>(() => (localStorage.getItem(STORAGE_KEY) as Mode | null) ?? "dark");
   const [systemDark, setSystemDark] = useState(
     () => window.matchMedia("(prefers-color-scheme: dark)").matches,
   );

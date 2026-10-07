@@ -5,7 +5,10 @@
 }
 
 {$SITE_ADDRESS:localhost} {
-	encode zstd gzip
+	# Compressed everywhere except the streamed ZIP downloads (Caddy has no
+	# "encode off"; the matcher form is the supported equivalent).
+	@notzip not path /api/v1/doc-sets/zip /api/v1/doc-sets/*/zip
+	encode @notzip zstd gzip
 
 	# SEC-8: security headers for the SPA. The boot script is a real file
 	# (public/boot.js), so no inline script needs to be allowed.
@@ -25,10 +28,6 @@
 	@assets path /assets/*
 	header @assets Cache-Control "public, max-age=31536000, immutable"
 
-	# Streamed ZIP downloads are not re-compressed (single and date-range routes).
-	@zip path /api/v1/doc-sets/zip /api/v1/doc-sets/*/zip
-	encode @zip off
-
 	handle /api/* {
 		reverse_proxy api:8000 {
 			# RT-5: Server-Sent Events must not be buffered.
@@ -41,7 +40,11 @@
 		reverse_proxy api:8000
 	}
 
-	root * /srv/www
-	try_files {path} /index.html
-	file_server
+	# The SPA fallback must live in its own handle block: as a bare directive it
+	# is ordered before the API handle blocks and swallows every /api request.
+	handle {
+		root * /srv/www
+		try_files {path} /index.html
+		file_server
+	}
 }

@@ -6,7 +6,7 @@ import { Dialog } from "../../ui/dialog";
 import { Button, ErrorNote, Field, Input, Select } from "../../ui/primitives";
 import { useToast } from "../../ui/toast";
 import { t } from "../../i18n";
-import { todayISO } from "../../lib/format";
+import { platformTimeZone, todayISO } from "../../lib/format";
 import type { InterviewStatus, InterviewStep, Paginated, User } from "../../types";
 
 /**
@@ -78,7 +78,7 @@ export function CreateInterviewDialog({
         step_id: stepId || null,
         status_id: statusId || null,
         meeting_at: startTime ? `${meetingDate}T${startTime.length === 5 ? `${startTime}:00` : startTime}` : null,
-        meeting_tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        meeting_tz: platformTimeZone(),
         attachment_ids: [resumeFile.id, jdFile.id],
       });
       push({ tone: "success", title: t("interviews.createInterviewSaved") });

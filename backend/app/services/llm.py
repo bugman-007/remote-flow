@@ -36,7 +36,7 @@ You must answer with a single JSON object that validates against the Remote Flow
 5. Do not include a "job_description" field. The system injects the original job description.
 
 Schema summary (all strings unless noted):
-  name (required), title (required), subtitle,
+  name (required), subtitle (required - the role headline shown under the name),
   email, phone, location, citizenship, work_authorization, linkedin,
   summary (required),
   technicalskills: { "<Category>": "comma-separated text" },
@@ -63,6 +63,9 @@ class ProviderConfig:
     temperature: float = DEFAULT_TEMPERATURE
     max_tokens: int = DEFAULT_MAX_TOKENS
     params: dict[str, Any] = field(default_factory=dict)
+    #: False = exactly one request per call: no JSON-mode fallback call and no
+    #: silent HTTP-level retry (Settings -> General, "one LLM request per resume").
+    resend: bool = True
 
 
 @dataclass
@@ -162,10 +165,14 @@ def validate_resume(data: Any) -> list[str]:
     errors: list[str] = []
     if not isinstance(data, dict):
         return ["response is not a JSON object"]
-    for field in ("name", "title", "target_company", "summary"):
+    for field in ("name", "target_company", "summary"):
         value = data.get(field)
         if not isinstance(value, str) or not value.strip():
             errors.append(f"{field} is required and must be a non-empty string")
+    # The role headline under the name lives in ``subtitle`` (that is what the
+    # profile prompts ask for); ``title`` is only accepted as a fallback.
+    if not any(isinstance(data.get(key), str) and data[key].strip() for key in ("subtitle", "title")):
+        errors.append("subtitle is required and must be a non-empty string")
     experience = data.get("experience")
     if not isinstance(experience, list) or not experience:
         errors.append("experience is required and must be a non-empty array")
@@ -262,8 +269,12 @@ async def generate_resume(
     profile_prompt: str,
     jd_text: str,
     schema: dict | None = None,
+    repair_rounds: int = REPAIR_ROUNDS,
 ) -> tuple[dict, str, list[dict]]:
-    """Call the model, repairing invalid JSON up to ``REPAIR_ROUNDS`` times.
+    """Call the model, repairing invalid JSON up to ``repair_rounds`` times.
+
+    ``repair_rounds=0`` is the one-request mode: an invalid reply fails the
+    attempt instead of being sent back to the model.
 
     Returns ``(canonical_json, raw_response, attempt_log)``. Provider errors
     raise ``LLMError`` immediately - they are retried by the pipeline, not here.
@@ -273,7 +284,7 @@ async def generate_resume(
     user = jd_text
     log: list[dict] = []
     last_raw = ""
-    for round_no in range(REPAIR_ROUNDS + 1):
+    for round_no in range(repair_rounds + 1):
         started = time.perf_counter()
         result = await client.generate_json(
             provider=provider, system=system, user=user, json_schema=schema, timeout_s=provider.timeout_s
@@ -284,14 +295,14 @@ async def generate_resume(
             parsed = extract_json(result.raw)
         except LLMError as exc:
             log.append({"round": round_no, "latency_ms": latency_ms, "error": exc.code,
-                        "finish_reason": result.finish_reason, "repair": round_no < REPAIR_ROUNDS})
+                        "finish_reason": result.finish_reason, "repair": round_no < repair_rounds})
             # GEN-4: a reply cut off by the token limit, or an empty reply, cannot be
             # fixed by asking again - fail fast with a code the operator can act on
             # instead of looping until the attempt budget runs out.
             if result.finish_reason == "length" or not (result.raw or "").strip():
                 raise truncation_error(provider, result, latency_ms=latency_ms) from exc
-            if round_no >= REPAIR_ROUNDS:
-                raise LLMError("invalid_json", f"model did not return JSON after {REPAIR_ROUNDS + 1} attempts") from exc
+            if round_no >= repair_rounds:
+                raise LLMError("invalid_json", f"model did not return valid JSON in {repair_rounds + 1} request(s)") from exc
             user = (
                 f"{jd_text}\n\n---\nYour previous reply was not valid JSON ({exc.message}). "
                 "Reply again with only the JSON object described in the system prompt."
@@ -305,12 +316,12 @@ async def generate_resume(
                 "latency_ms": latency_ms,
                 "usage": result.usage,
                 "errors": errors,
-                "repair": bool(errors) and round_no < REPAIR_ROUNDS,
+                "repair": bool(errors) and round_no < repair_rounds,
             }
         )
         if not errors:
             return canonical, result.raw, log
-        if round_no >= REPAIR_ROUNDS:
+        if round_no >= repair_rounds:
             raise LLMError("invalid_schema", "resume JSON failed validation: " + "; ".join(errors))
         user = (
             f"{jd_text}\n\n---\nYour previous JSON failed schema validation: {'; '.join(errors)}. "
@@ -422,12 +433,17 @@ class LiteLLMClient:
             kwargs["api_base"] = provider.base_url
         kwargs["response_format"] = json_response_format(provider, json_schema)
         kwargs.update(provider.params or {})
+        if not provider.resend:
+            # LiteLLM's OpenAI-compatible client resends a failed request twice by
+            # default (429, 5xx, timeouts, dropped connections) without telling us.
+            kwargs["num_retries"] = 0
+            kwargs["max_retries"] = 0
         started = time.perf_counter()
         try:
             response = await litellm.acompletion(**kwargs)
         except Exception as exc:  # noqa: BLE001 - mapped to a pipeline error code
             # Any other gateway that refuses json_schema still gets a JSON answer.
-            if kwargs["response_format"].get("type") == "json_schema" and is_response_format_error(exc):
+            if provider.resend and kwargs["response_format"].get("type") == "json_schema" and is_response_format_error(exc):
                 kwargs["response_format"] = {"type": "json_object"}
                 try:
                     response = await litellm.acompletion(**kwargs)

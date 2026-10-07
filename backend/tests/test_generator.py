@@ -39,6 +39,17 @@ def test_make_names_falls_back_to_subtitle_and_slugifies():
     assert basename == "AB_DevOps-Lead"
 
 
+def test_the_subtitle_is_the_resume_title_even_when_a_title_is_present():
+    data = {"name": "Ada Lovelace", "title": "Software Engineer", "subtitle": "Senior Backend Engineer | Remote"}
+    assert core.headline(data) == "Senior Backend Engineer | Remote"
+    assert core.role_title(data) == "Senior Backend Engineer"
+    assert core.make_names(data) == ("Ada Lovelace", "Ada-Lovelace_Senior-Backend-Engineer")
+    header = next(block for block in core.build_blocks(data) if block.kind == "title")
+    assert "".join(run.text for run in header.runs) == "Senior Backend Engineer | Remote"
+    fallback = {"name": "Ada Lovelace", "title": "Software Engineer"}
+    assert core.make_names(fallback)[1] == "Ada-Lovelace_Software-Engineer"
+
+
 def test_highlight_parsing_supports_span_suffix_and_markdown():
     runs = core.parse_highlights("a [highlight]b[/highlight] c**d** e[highlight]")
     assert [run.text for run in runs] == ["a ", "b", " c", "d", " ", "e"]
@@ -138,3 +149,113 @@ def test_generated_docx_contains_expected_text(tmp_path):
     assert "Nimbus Logistics" in text
     assert "Technical Skills" in text
     assert path.read_bytes()[:2] == b"PK"
+
+
+# ------------------------------------------- Appendix C.2 element styling (v2)
+
+
+def _rich_theme(**extra):
+    theme = {
+        **core.DEFAULTS,
+        "accent": "#0F766E",
+        "body_color": "#111827",
+        "elements": {
+            "name": {"align": "center", "size": 26, "letter_spacing": 1.0, "width_scale": 110},
+            "section": {"uppercase": True, "rule_width": 12, "space_before": 16, "bg": "#F0FDFA"},
+            "meta": {"hidden": True},
+        },
+        "text_rules": [{"text": "Node.js", "bold": True, "color": "#B91C1C", "underline": True}],
+    }
+    theme.update(extra)
+    return theme
+
+
+def test_theme_v1_snapshot_still_renders(tmp_path):
+    """Back-compat: a snapshot saved before Appendix C.2 renders unchanged."""
+    from docx import Document
+
+    data = json.loads(SAMPLE.read_text())
+    old_snapshot = {
+        "font": "Calibri",
+        "size": 10.5,
+        "accent": "#1F4E79",
+        "bg_color": "#FFFFFF",
+        "line_height": 1.0,
+        "section_gap": 9,
+        "margin_top": 0.7,
+        "margin_bottom": 0.7,
+        "margin_left": 0.75,
+        "margin_right": 0.75,
+    }
+    path = tmp_path / "v1.docx"
+    core.build_docx(core.build_blocks(data), old_snapshot, path)
+    document = Document(str(path))
+    assert "Luis Angel Salazar" in "\n".join(p.text for p in document.paragraphs)
+
+
+def test_element_overrides_only_touch_their_own_kind(tmp_path):
+    from docx import Document
+
+    data = json.loads(SAMPLE.read_text())
+    path = tmp_path / "styled.docx"
+    core.build_docx(core.build_blocks(data), _rich_theme(), path)
+    document = Document(str(path))
+    paragraphs = document.paragraphs
+
+    name = paragraphs[0]
+    assert name.text == "Luis Angel Salazar"
+    assert str(name.alignment) == "CENTER (1)"
+    assert name.runs[0].font.size.pt == 26.0
+    assert 'w:w w:val="110"' in name._p.xml  # character width scaling
+
+    title = paragraphs[1]
+    assert str(title.alignment) != "CENTER (1)"
+
+    sections = [p for p in paragraphs if p.text == "SUMMARY"]
+    assert sections, "section heading should be upper-cased"
+    assert "w:shd" in sections[0]._p.xml  # element background
+
+
+def test_hidden_element_is_not_rendered(tmp_path):
+    from docx import Document
+
+    data = json.loads(SAMPLE.read_text())
+    path = tmp_path / "hidden.docx"
+    core.build_docx(core.build_blocks(data), _rich_theme(), path)
+    document = Document(str(path))
+    assert not any(p.text.strip() == "Austin, TX" for p in document.paragraphs)
+
+
+def test_text_rules_style_every_occurrence(tmp_path):
+    from docx import Document
+
+    data = json.loads(SAMPLE.read_text())
+    path = tmp_path / "rules.docx"
+    core.build_docx(core.build_blocks(data), _rich_theme(), path)
+    document = Document(str(path))
+    hits = [run for paragraph in document.paragraphs for run in paragraph.runs if "Node.js" in run.text]
+    assert hits, "the sample mentions Node.js several times"
+    assert all(run.font.bold and run.font.underline for run in hits)
+    assert all(str(run.font.color.rgb) == "B91C1C" for run in hits)
+    assert all(run.text == "Node.js" for run in hits), "runs are split exactly on the rule"
+
+
+def test_apply_text_rules_is_case_insensitive_and_skips_absent_text():
+    runs = [core.Run("Senior Full Stack Developer"), core.Run("Nothing here")]
+    out = core.apply_text_rules(runs, [{"text": "full stack", "bold": True}])
+    assert [(run.text, run.bold) for run in out] == [
+        ("Senior ", False),
+        ("Full Stack", True),
+        (" Developer", False),
+        ("Nothing here", False),
+    ]
+
+
+def test_resolve_element_defaults_match_the_v1_style():
+    style = core.resolve_element(core.DEFAULTS, "name")
+    assert style["size"] == core.DEFAULTS["size"] + core.SIZE_OFFSETS["name"]
+    assert style["bold"] is True
+    assert style["color"] == "1F4E79"
+    body = core.resolve_element(core.DEFAULTS, "body")
+    assert body["align"] == "justify"
+    assert body["indent_left"] is None

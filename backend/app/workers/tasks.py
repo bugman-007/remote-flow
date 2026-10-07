@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from app.db import session_scope
-from app.services import dispatch, metrics, pipeline, release, retention, stats
+from app.services import dispatch, metrics, pipeline, pool, release, retention, stats
 from app.services import events as events_service
 from app.workers.celery_app import celery_app
 from app.workers.runtime import run_async
@@ -49,6 +49,27 @@ def dispatch_sweep() -> int:
             await session.commit()
             await dispatch.flush_dispatches(session)
             return count
+
+    return run_async(work)
+
+
+@celery_app.task(name="app.workers.tasks.pool_tick")
+def pool_tick() -> dict:
+    """CONC-2: measure the box, decide the LLM pool size, apply it.
+
+    The sweep runs in the same cycle so a slot the controller has just opened is
+    filled immediately instead of waiting for the next 30 s dispatch sweep -
+    throughput is the whole point of the pool.
+    """
+    async def work():
+        async with session_scope() as session:
+            state = await pool.tick(session)
+            await session.commit()
+            if state.get("budget"):
+                await pipeline.dispatch_sweep(session)
+                await session.commit()
+            await dispatch.flush_dispatches(session)
+            return state
 
     return run_async(work)
 

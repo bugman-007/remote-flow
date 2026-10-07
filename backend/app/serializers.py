@@ -92,6 +92,7 @@ def profile_out(
     provider_name: str | None = None,
     active_prompt: PromptVersion | None = None,
     shared_only: bool = False,
+    group: Any = None,
 ) -> dict:
     if shared_only:
         allowed = set(profile.shared_fields or [])
@@ -130,6 +131,7 @@ def profile_out(
         "active_prompt": prompt_version_out(active_prompt) if active_prompt else None,
         "maker_count": maker_count,
         "doc_set_count": doc_set_count,
+        "group": {"id": group.id, "name": group.name, "color": group.color} if group is not None else None,
         "created_at": profile.created_at,
         "updated_at": profile.updated_at,
     }
@@ -155,6 +157,9 @@ def job_out(
         "skipped_at": job.skipped_at,
         "duplicate_of": job.duplicate_of,
         "duplicate_seq": duplicate_seq,
+        "source": job.source,
+        "job_link": job.job_link,
+        "skip_reason": job.skip_reason,
         "status": derived,
         "doc_set": doc_set_summary(doc_set) if doc_set else None,
     }

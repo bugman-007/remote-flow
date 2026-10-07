@@ -40,8 +40,19 @@ def test_canonicalise_maps_legacy_aliases():
 
 def test_validate_reports_missing_required_fields():
     errors = validate_resume({"name": "", "experience": []})
-    assert any("title" in error for error in errors)
+    assert any(error.startswith("subtitle is required") for error in errors)
     assert any("experience" in error for error in errors)
+
+
+def _resume(**headline):
+    return {"name": "Ada", "target_company": "Acme", "summary": "s",
+            "experience": [{"title": "Engineer", "company": "Acme", "bullets": ["b"]}], **headline}
+
+
+def test_the_role_headline_is_the_subtitle_and_title_is_not_required():
+    assert validate_resume(_resume(subtitle="Backend Engineer")) == []
+    assert validate_resume(_resume(title="Backend Engineer")) == [], "title still works as a fallback"
+    assert validate_resume(_resume(subtitle="  ", title="")) == ["subtitle is required and must be a non-empty string"]
 
 
 def test_extract_json_handles_markdown_fences_and_prose():

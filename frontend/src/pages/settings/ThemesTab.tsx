@@ -1,24 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Eye, FileUp, Plus } from "lucide-react";
+import { Eye, Plus } from "lucide-react";
 import { api, errorMessage } from "../../lib/api";
-import { Badge, Button, Card, EmptyState, ErrorNote, Field, Input, Select, Spinner, Textarea } from "../../ui/primitives";
-import { Dialog } from "../../ui/dialog";
+import { Badge, Button, Card, EmptyState, ErrorNote, Spinner } from "../../ui/primitives";
 import { Table } from "../../ui/table";
 import { useToast } from "../../ui/toast";
 import { t } from "../../i18n";
-import type { Profile, Theme, ThemeParams } from "../../types";
-
-interface ThemeField {
-  key: string;
-  type: string;
-  min: number | null;
-  max: number | null;
-  step: number | null;
-  default: unknown;
-  options: string[] | null;
-  font_labels: { name: string }[] | null;
-}
+import type { Theme, ThemeSchema } from "../../types";
+import { ThemeEditor } from "./ThemeEditor";
 
 export function ThemesTab() {
   const { push } = useToast();
@@ -34,7 +23,8 @@ export function ThemesTab() {
 
   const schema = useQuery({
     queryKey: ["theme-schema"],
-    queryFn: () => api.get<{ fields: ThemeField[]; defaults: ThemeParams; fonts: { name: string }[] }>("/themes/schema"),
+    queryFn: () => api.get<ThemeSchema>("/themes/schema"),
+    staleTime: Infinity,
   });
 
   const refresh = () => void queryClient.invalidateQueries({ queryKey: ["themes"] });
@@ -135,11 +125,10 @@ export function ThemesTab() {
         </Card>
       ) : null}
 
-      <ThemeDialog
+      <ThemeEditor
         open={creating || Boolean(editing)}
         theme={editing}
-        fields={schema.data?.fields ?? []}
-        defaults={schema.data?.defaults ?? {}}
+        schema={schema.data}
         onClose={() => {
           setCreating(false);
           setEditing(null);
@@ -151,257 +140,5 @@ export function ThemesTab() {
         }}
       />
     </div>
-  );
-}
-
-function ThemeDialog({
-  open,
-  theme,
-  fields,
-  defaults,
-  onClose,
-  onSaved,
-}: {
-  open: boolean;
-  theme: Theme | null;
-  fields: ThemeField[];
-  defaults: ThemeParams;
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const { push } = useToast();
-  const queryClient = useQueryClient();
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [params, setParams] = useState<ThemeParams>({});
-  const [assigned, setAssigned] = useState<string[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [previewBusy, setPreviewBusy] = useState(false);
-  const [importBusy, setImportBusy] = useState(false);
-  const [importSource, setImportSource] = useState<string | null>(null);
-  const fileRef = useRef<HTMLInputElement | null>(null);
-
-  const profiles = useQuery({
-    queryKey: ["profiles"],
-    queryFn: () => api.get<{ items: Profile[] }>("/profiles"),
-    enabled: open,
-  });
-
-  useEffect(() => {
-    if (!open) return;
-    setName(theme?.name ?? "");
-    setDescription(theme?.description ?? "");
-    setParams({ ...defaults, ...(theme?.params ?? {}) });
-    setAssigned((theme?.profiles ?? []).map((profile) => profile.id));
-    setImportSource(null);
-    setError(null);
-  }, [open, theme, defaults]);
-
-  // SET-10: render the unsaved params so the Manager sees the result while editing.
-  const livePreview = async () => {
-    setError(null);
-    setPreviewBusy(true);
-    try {
-      const blob = await api.requestBlob("/themes/preview", { method: "POST", body: { params } });
-      const url = URL.createObjectURL(blob);
-      setPreviewUrl((current) => {
-        if (current) URL.revokeObjectURL(current);
-        return url;
-      });
-    } catch (caught) {
-      setError(errorMessage(caught));
-    } finally {
-      setPreviewBusy(false);
-    }
-  };
-
-  useEffect(() => {
-    if (open) return;
-    setPreviewUrl((current) => {
-      if (current) URL.revokeObjectURL(current);
-      return null;
-    });
-  }, [open]);
-
-  // SET-11: read an existing resume and pre-fill the form so the Manager can tweak it.
-  const importResume = async (file: File) => {
-    setError(null);
-    setImportBusy(true);
-    try {
-      const body = new FormData();
-      body.append("file", file);
-      const result = await api.post<{
-        name: string;
-        description: string;
-        params: ThemeParams;
-        source: { font: string | null; size: number; accent: string };
-        warnings: string[];
-      }>("/themes/import-resume", body);
-      setName(result.name);
-      setDescription(result.description);
-      setParams({ ...defaults, ...result.params });
-      setImportSource(
-        t("settings.themes.importSource", {
-          font: result.source.font ?? "—",
-          size: result.source.size,
-          accent: result.source.accent,
-        }),
-      );
-      push({ tone: "success", title: t("settings.themes.importDone", { name: file.name }) });
-      if (result.warnings.length) setError(result.warnings.join(" "));
-    } catch (caught) {
-      setError(errorMessage(caught));
-    } finally {
-      setImportBusy(false);
-      if (fileRef.current) fileRef.current.value = "";
-    }
-  };
-
-  const save = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const payload = { name, description, params };
-      let id = theme?.id ?? null;
-      if (id) await api.patch(`/themes/${id}`, payload);
-      else {
-        const created = await api.post<Theme>("/themes", payload);
-        id = created.id;
-      }
-      if (id) await api.post(`/themes/${id}/assign`, { profile_ids: assigned });
-      push({ tone: "success", title: t("toast.saved") });
-      await queryClient.invalidateQueries({ queryKey: ["themes"] });
-      onSaved();
-    } catch (caught) {
-      setError(errorMessage(caught));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      title={theme ? t("common.edit") : t("settings.themes.create")}
-      width="max-w-2xl"
-      footer={
-        <>
-          <Button variant="outline" onClick={onClose} disabled={busy}>
-            {t("common.cancel")}
-          </Button>
-          <Button onClick={() => void save()} loading={busy} disabled={!name}>
-            {t("common.save")}
-          </Button>
-        </>
-      }
-    >
-      <div className="grid gap-3 tablet:grid-cols-2">
-        <Field label={t("common.name")}>
-          <Input value={name} onChange={(event) => setName(event.target.value)} />
-        </Field>
-        <Field label={t("common.description")}>
-          <Textarea value={description} onChange={(event) => setDescription(event.target.value)} />
-        </Field>
-        {fields.map((field) => (
-          <Field key={field.key} label={field.key.replace(/_/g, " ")} hint={field.min !== null ? `${field.min} – ${field.max}` : undefined}>
-            {field.type === "font" ? (
-              <Select value={String(params[field.key] ?? "")} onChange={(event) => setParams({ ...params, [field.key]: event.target.value })}>
-                {(field.options ?? []).map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </Select>
-            ) : field.type === "color" ? (
-              <span className="flex items-center gap-2">
-                <input
-                  type="color"
-                  className="h-9 w-12 rounded border border-input"
-                  value={String(params[field.key] ?? "#ffffff")}
-                  onChange={(event) => setParams({ ...params, [field.key]: event.target.value })}
-                />
-                <Input value={String(params[field.key] ?? "")} onChange={(event) => setParams({ ...params, [field.key]: event.target.value })} />
-              </span>
-            ) : (
-              <Input
-                type={field.type === "number_pct" || field.type === "number" ? "number" : "text"}
-                step={field.step ?? undefined}
-                min={field.min ?? undefined}
-                max={field.max ?? undefined}
-                value={String(params[field.key] ?? "")}
-                onChange={(event) =>
-                  setParams({ ...params, [field.key]: event.target.value === "" ? null : Number(event.target.value) })
-                }
-              />
-            )}
-          </Field>
-        ))}
-        <Field label={t("settings.themes.importResume")} hint={t("settings.themes.importHint")} className="tablet:col-span-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".docx"
-              className="text-xs"
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (file) void importResume(file);
-              }}
-            />
-            {importBusy ? (
-              <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                <Spinner /> {t("settings.themes.importRunning")}
-              </span>
-            ) : (
-              <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                <FileUp className="h-3.5 w-3.5" /> .docx
-              </span>
-            )}
-          </div>
-          {importSource ? <p className="mt-1 text-xs text-muted-foreground">{importSource}</p> : null}
-        </Field>
-        <Field label={t("settings.themes.assign")} className="tablet:col-span-2">
-          <div className="flex flex-wrap gap-3">
-            {(profiles.data?.items ?? []).map((profile) => (
-              <label key={profile.id} className="flex items-center gap-1 text-sm">
-                <input
-                  type="checkbox"
-                  className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
-                  checked={assigned.includes(profile.id)}
-                  onChange={(event) =>
-                    setAssigned(event.target.checked ? [...assigned, profile.id] : assigned.filter((value) => value !== profile.id))
-                  }
-                />
-                {profile.name}
-              </label>
-            ))}
-          </div>
-        </Field>
-      </div>
-      <div className="mt-3">
-        <Button size="sm" variant="outline" onClick={() => void livePreview()} loading={previewBusy}>
-          <Eye className="h-3.5 w-3.5" />
-          {t("settings.themes.livePreview")}
-        </Button>
-      </div>
-      {previewUrl ? (
-        <div className="mt-3">
-          <iframe
-            title={t("settings.themes.livePreview")}
-            src={previewUrl}
-            className="h-[45vh] w-full rounded border border-border"
-          />
-        </div>
-      ) : null}
-      {error ? (
-        <div className="mt-3">
-          <ErrorNote>{error}</ErrorNote>
-        </div>
-      ) : null}
-      <p className="mt-2 text-xs text-muted-foreground">{t("settings.themes.applies")}</p>
-    </Dialog>
   );
 }

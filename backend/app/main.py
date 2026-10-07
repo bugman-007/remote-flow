@@ -20,6 +20,7 @@ from app.errors import install_error_handlers
 from app.logging_setup import configure_logging, request_id_var, user_id_var
 from app.routers import (
     auth,
+    bulk,
     doc_sets,
     events,
     files,
@@ -27,6 +28,7 @@ from app.routers import (
     interviews,
     jobs,
     ops,
+    profile_groups,
     profiles,
     settings as settings_router,
     stats,
@@ -153,6 +155,8 @@ def create_app() -> FastAPI:
         doc_sets.router,
         files.router,
         profiles.router,
+        profile_groups.router,
+        bulk.router,
         interviews.router,
         interview_taxonomy.router,
         settings_router.router,

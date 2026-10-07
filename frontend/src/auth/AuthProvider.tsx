@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, notifyUnauthorized } from "../lib/api";
+import { setPlatformTimeZone } from "../lib/format";
 import type { Role, User } from "../types";
 
 export const ROLE_HOME: Record<Role, string> = {
@@ -31,7 +32,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const reload = useCallback(async (): Promise<User | null> => {
     try {
-      const payload = await api.get<{ user: User }>("/auth/me");
+      const payload = await api.get<{ user: User; timezone?: string }>("/auth/me");
+      setPlatformTimeZone(payload.timezone);
       setUser(payload.user);
       return payload.user;
     } catch {
@@ -54,11 +56,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = useCallback(async (email: string, password: string, asAdmin: boolean) => {
-    const payload = await api.post<{ user: User; redirect: string }>("/auth/login", {
+    const payload = await api.post<{ user: User; redirect: string; timezone?: string }>("/auth/login", {
       email,
       password,
       as_admin: asAdmin,
     });
+    setPlatformTimeZone(payload.timezone);
     setUser(payload.user);
     return payload;
   }, []);
